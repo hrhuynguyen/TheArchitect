@@ -16,7 +16,7 @@ import {
 import { Button, StatusBadge } from "@architect/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { PatchReviewDialog } from "./PatchReviewDialog.js";
+import { PatchReviewDialog } from "./PatchReviewDialog";
 
 export const ARCHITECT_POLL_INTERVAL_MS = 2_000;
 export const ARCHITECT_MAX_POLL_ATTEMPTS = 76;
