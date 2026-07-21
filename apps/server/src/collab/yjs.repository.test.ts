@@ -9,7 +9,9 @@ import { describe, expect, it } from "vitest";
 import { createSnapshotService } from "./snapshot.service.js";
 import {
   createYjsRepository,
+  SnapshotProtectedStateLostError,
   type SnapshotDatabase,
+  type SnapshotProtectedStateFence,
   type SnapshotRecord,
 } from "./yjs.repository.js";
 
@@ -153,6 +155,17 @@ function documentWithArchitecture(revisionId: string, name: string): Y.Doc {
   return document;
 }
 
+function readProtectedState(document: Y.Doc) {
+  return {
+    architecture: document
+      .getMap(ARCHITECTURE_MAP_KEY)
+      .get(ARCHITECTURE_CURRENT_KEY),
+    layout: document
+      .getMap(ARCHITECTURE_LAYOUT_MAP_KEY)
+      .get(ARCHITECTURE_CURRENT_KEY),
+  } as SnapshotProtectedStateFence["expectedProtectedState"];
+}
+
 describe("Yjs snapshot repository", () => {
   it("rejects a SnapshotService payload encoded before an atomic revision commit", async () => {
     const memory = createMemoryDatabase();
@@ -209,6 +222,119 @@ describe("Yjs snapshot repository", () => {
 
     restarted.destroy();
     live.destroy();
+  });
+
+  it("rejects a SnapshotService payload older than a same-revision architecture operation", async () => {
+    const memory = createMemoryDatabase();
+    memory.setRoom({
+      id: "room-a",
+      phase: "architect",
+      currentRevisionId: "revision-a",
+    });
+    const repository = createYjsRepository(memory.database);
+    const live = documentWithArchitecture("revision-a", "Before operation");
+    memory.snapshots.push({
+      roomId: "room-a",
+      version: 1,
+      payload: Y.encodeStateAsUpdate(live),
+      reason: "architecture_fixture",
+    });
+    const snapshots = createSnapshotService({
+      persistRoomSnapshot: repository.persistRoomSnapshot,
+    });
+    snapshots.track("room-a", live);
+    live.getMap("shared").set("dirty", true);
+    await snapshots.changed("room-a", live);
+
+    memory.beforeNextTransaction(() => {
+      const operated = documentWithArchitecture(
+        "revision-a",
+        "After operation",
+      );
+      memory.snapshots.push({
+        roomId: "room-a",
+        version: 2,
+        payload: Y.encodeStateAsUpdate(operated),
+        reason: "architecture_operations",
+      });
+      live.getMap(ARCHITECTURE_MAP_KEY).set(
+        ARCHITECTURE_CURRENT_KEY,
+        operated.getMap(ARCHITECTURE_MAP_KEY).get(ARCHITECTURE_CURRENT_KEY),
+      );
+      operated.destroy();
+    });
+
+    await expect(snapshots.store("room-a", live)).rejects.toThrow(
+      "Snapshot protected state is stale",
+    );
+    const restarted = await repository.loadRoomDocument("room-a");
+    expect(
+      (restarted
+        .getMap(ARCHITECTURE_MAP_KEY)
+        .get(ARCHITECTURE_CURRENT_KEY) as { architecture: {
+          resources: Array<{ name: string }>;
+        } }).architecture.resources[0]?.name,
+    ).toBe("After operation");
+    expect(memory.snapshots).toHaveLength(2);
+
+    restarted.destroy();
+    live.destroy();
+  });
+
+  it("allows only one concurrent authoritative operation from the same protected base", async () => {
+    const memory = createMemoryDatabase();
+    memory.setRoom({
+      id: "room-a",
+      phase: "architect",
+      currentRevisionId: "revision-a",
+    });
+    const repository = createYjsRepository(memory.database);
+    const initial = documentWithArchitecture("revision-a", "Before");
+    const candidateA = documentWithArchitecture("revision-a", "Writer A");
+    const candidateB = documentWithArchitecture("revision-a", "Writer B");
+    await repository.persistRoomSnapshot(
+      "room-a",
+      initial,
+      "architecture_fixture",
+      { kind: "protected_state", expectedProtectedState: null },
+    );
+    const fence = {
+      kind: "protected_state" as const,
+      expectedProtectedState: readProtectedState(initial),
+    };
+
+    const results = await Promise.allSettled([
+      repository.persistRoomSnapshot(
+        "room-a",
+        candidateA,
+        "architecture_operations",
+        fence,
+      ),
+      repository.persistRoomSnapshot(
+        "room-a",
+        candidateB,
+        "architecture_operations",
+        fence,
+      ),
+    ]);
+
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find(({ status }) => status === "rejected");
+    expect(rejected).toMatchObject({
+      status: "rejected",
+      reason: expect.any(SnapshotProtectedStateLostError),
+    });
+    expect(memory.snapshots).toHaveLength(2);
+    const restarted = await repository.loadRoomDocument("room-a");
+    const restartedState = readProtectedState(restarted);
+    expect(["Writer A", "Writer B"]).toContain(
+      restartedState?.architecture.architecture.resources[0]?.name,
+    );
+
+    restarted.destroy();
+    initial.destroy();
+    candidateA.destroy();
+    candidateB.destroy();
   });
 
   it("restores only the latest Yjs snapshot after a new process loads the room", async () => {

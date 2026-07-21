@@ -3,7 +3,9 @@ import {
   ARCHITECTURE_LAYOUT_MAP_KEY,
   ARCHITECTURE_MAP_KEY,
   ReconstructionYjsStateSchema,
+  type ReconstructionYjsState,
 } from "@architect/contracts";
+import { isDeepStrictEqual } from "node:util";
 import * as Y from "yjs";
 import { prisma } from "../db/client.js";
 
@@ -39,7 +41,7 @@ type SnapshotTransaction = {
       currentRevisionId: string | null;
     } | null>;
   };
-  yjsSnapshot: Pick<SnapshotModel, "aggregate" | "create">;
+  yjsSnapshot: Pick<SnapshotModel, "findFirst" | "aggregate" | "create">;
   transitionJob: {
     findFirst(input: {
       where: {
@@ -72,6 +74,13 @@ export type SnapshotLeaseFence = Readonly<{
   expectedState: "publishing" | "failed" | "succeeded";
 }>;
 
+export type SnapshotProtectedStateFence = Readonly<{
+  kind: "protected_state";
+  expectedProtectedState: ReconstructionYjsState | null;
+}>;
+
+type SnapshotWriteFence = SnapshotLeaseFence | SnapshotProtectedStateFence;
+
 export class SnapshotLeaseLostError extends Error {
   constructor() {
     super("Reconstruction snapshot lease was lost");
@@ -86,6 +95,13 @@ export class SnapshotRevisionLostError extends Error {
   }
 }
 
+export class SnapshotProtectedStateLostError extends Error {
+  constructor() {
+    super("Snapshot protected state is stale");
+    this.name = "SnapshotProtectedStateLostError";
+  }
+}
+
 const MAX_WRITE_ATTEMPTS = 8;
 
 function retryableVersionRace(error: unknown): boolean {
@@ -94,7 +110,7 @@ function retryableVersionRace(error: unknown): boolean {
   return code === "P2002" || code === "P2034";
 }
 
-function architectureRevision(document: Y.Doc): string | null {
+function protectedState(document: Y.Doc): ReconstructionYjsState | null {
   const architecture = document
     .getMap(ARCHITECTURE_MAP_KEY)
     .get(ARCHITECTURE_CURRENT_KEY);
@@ -107,7 +123,20 @@ function architectureRevision(document: Y.Doc): string | null {
     layout,
   });
   if (!parsed.success) throw new SnapshotRevisionLostError();
-  return parsed.data.architecture.revisionId;
+  return parsed.data;
+}
+
+function protectedStateFromSnapshot(
+  snapshot: SnapshotRecord | null,
+): ReconstructionYjsState | null {
+  if (!snapshot) return null;
+  const document = new Y.Doc();
+  try {
+    Y.applyUpdate(document, new Uint8Array(snapshot.payload));
+    return protectedState(document);
+  } finally {
+    document.destroy();
+  }
 }
 
 export function createYjsRepository(
@@ -133,9 +162,11 @@ export function createYjsRepository(
       roomId: string,
       document: Y.Doc,
       reason: string,
-      fence?: SnapshotLeaseFence,
+      fence?: SnapshotWriteFence,
     ): Promise<number> {
-      const candidateRevisionId = architectureRevision(document);
+      const candidateProtectedState = protectedState(document);
+      const candidateRevisionId =
+        candidateProtectedState?.architecture.revisionId ?? null;
       const payload = Buffer.from(Y.encodeStateAsUpdate(document));
 
       for (let attempt = 1; attempt <= MAX_WRITE_ATTEMPTS; attempt += 1) {
@@ -146,13 +177,17 @@ export function createYjsRepository(
                 id: string;
                 architectureRevisionId: string | null;
               } | null = null;
-              if (fence) {
+              const leaseFence = fence && !("kind" in fence) ? fence : null;
+              const protectedStateFence = fence && "kind" in fence
+                ? fence
+                : null;
+              if (leaseFence) {
                 activeLease = await transaction.transitionJob.findFirst({
                   where: {
-                    id: fence.jobId,
+                    id: leaseFence.jobId,
                     roomId,
-                    state: fence.expectedState,
-                    leaseToken: fence.token,
+                    state: leaseFence.expectedState,
+                    leaseToken: leaseFence.token,
                     leaseExpiresAt: { gt: now() },
                   },
                   select: { id: true, architectureRevisionId: true },
@@ -170,7 +205,7 @@ export function createYjsRepository(
                 }
               } else if (candidateRevisionId !== null) {
                 if (
-                  fence?.expectedState !== "publishing" ||
+                  leaseFence?.expectedState !== "publishing" ||
                   activeLease?.architectureRevisionId !== candidateRevisionId
                 ) {
                   throw new SnapshotRevisionLostError();
@@ -188,6 +223,30 @@ export function createYjsRepository(
                 if (publishingArchitecture) {
                   throw new SnapshotRevisionLostError();
                 }
+              }
+              const latestSnapshot =
+                await transaction.yjsSnapshot.findFirst({
+                  where: { roomId },
+                  orderBy: { version: "desc" },
+                });
+              const latestProtectedState =
+                protectedStateFromSnapshot(latestSnapshot);
+              const expectedProtectedState = protectedStateFence
+                ? protectedStateFence.expectedProtectedState
+                : candidateProtectedState;
+              const authorizedReconstructionArchitecture =
+                room.currentRevisionId === null &&
+                candidateRevisionId !== null &&
+                leaseFence?.expectedState === "publishing" &&
+                activeLease?.architectureRevisionId === candidateRevisionId;
+              if (
+                !authorizedReconstructionArchitecture &&
+                !isDeepStrictEqual(
+                  latestProtectedState,
+                  expectedProtectedState,
+                )
+              ) {
+                throw new SnapshotProtectedStateLostError();
               }
               const latest = await transaction.yjsSnapshot.aggregate({
                 where: { roomId },

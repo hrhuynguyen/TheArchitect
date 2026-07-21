@@ -99,6 +99,52 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function historyPayload(
+  revisionId = "revision-b",
+  version = 2,
+  rationale = "Observed from the other editor.",
+) {
+  return {
+    revisions: [{
+      id: revisionId,
+      roomId: "room-a",
+      version,
+      architecture,
+      layout: { ...initialState.layout, revisionId },
+      requirements,
+      stage: "prototype",
+      authorType: "participant",
+      authorId: "participant-a",
+      rationale,
+      createdAt: "2026-07-21T12:00:00.000Z",
+    }],
+    events: [{
+      id: `event-${revisionId}`,
+      roomId: "room-a",
+      kind: "architecture_revision_saved",
+      status: "succeeded",
+      actorType: "participant",
+      actorId: "participant-a",
+      title: "Architecture revision saved",
+      summary: rationale,
+      details: { revisionId, version },
+      traceId: "request-a",
+      createdAt: "2026-07-21T12:00:00.000Z",
+    }],
+  };
+}
+
+function rebaseDocument(document: Y.Doc, revisionId: string) {
+  document.getMap(ARCHITECTURE_MAP_KEY).set(ARCHITECTURE_CURRENT_KEY, {
+    ...initialState.architecture,
+    revisionId,
+  });
+  document.getMap(ARCHITECTURE_LAYOUT_MAP_KEY).set(ARCHITECTURE_CURRENT_KEY, {
+    ...initialState.layout,
+    revisionId,
+  });
+}
+
 function setup() {
   const doc = new Y.Doc();
   doc.getMap(ARCHITECTURE_MAP_KEY).set(
@@ -363,5 +409,94 @@ describe("GraphEditor", () => {
     expect(screen.queryByRole("button", { name: "HTTP saved" }))
       .not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "WebSocket newest" })).toBeVisible();
+  });
+
+  it("refreshes history in both editors when Yjs observes a new revision", async () => {
+    const editorA = setup();
+    const editorB = setup();
+    for (const editor of [editorA, editorB]) {
+      let reads = 0;
+      editor.fetchBoundary.mockImplementation(async (
+        url: string,
+        init?: RequestInit,
+      ) => {
+        if (url.endsWith("/revisions") && !init?.method) {
+          reads += 1;
+          return response(reads === 1
+            ? { revisions: [], events: [] }
+            : historyPayload());
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+    }
+    render(<>
+      <GraphEditor dependencies={editorA.dependencies as never} roomId="room-a" />
+      <GraphEditor dependencies={editorB.dependencies as never} roomId="room-a" />
+    </>);
+    await waitFor(() => {
+      expect(editorA.fetchBoundary).toHaveBeenCalledTimes(1);
+      expect(editorB.fetchBoundary).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      rebaseDocument(editorA.doc, "revision-b");
+      rebaseDocument(editorB.doc, "revision-b");
+    });
+
+    await waitFor(() => {
+      expect(editorA.fetchBoundary).toHaveBeenCalledTimes(2);
+      expect(editorB.fetchBoundary).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.getAllByRole("heading", { name: "Revision 2" }))
+      .toHaveLength(2);
+  });
+
+  it("does not let an older history request overwrite a newer revision list", async () => {
+    const test = setup();
+    const oldHistory = deferred<Response>();
+    const newHistory = deferred<Response>();
+    const saveResponse = deferred<Response>();
+    let historyReads = 0;
+    test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/revisions") && init?.method === "POST") {
+        return saveResponse.promise;
+      }
+      if (url.endsWith("/revisions") && !init?.method) {
+        historyReads += 1;
+        return historyReads === 1 ? oldHistory.promise : newHistory.promise;
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const user = userEvent.setup();
+    render(<GraphEditor dependencies={test.dependencies as never} roomId="room-a" />);
+    await waitFor(() => expect(historyReads).toBe(1));
+
+    await user.type(
+      screen.getByRole("textbox", { name: "Rationale" }),
+      "Save the observed revision.",
+    );
+    await user.click(screen.getByRole("button", { name: "Save revision" }));
+    await waitFor(() => expect(test.fetchBoundary.mock.calls.some(
+      ([url, init]) => url.endsWith("/revisions") && init?.method === "POST",
+    )).toBe(true));
+    act(() => rebaseDocument(test.doc, "revision-b"));
+    saveResponse.resolve(response({
+      revision: historyPayload().revisions[0],
+      event: historyPayload().events[0],
+    }, 201));
+    await waitFor(() => expect(historyReads).toBe(2));
+
+    newHistory.resolve(response(historyPayload()));
+    expect(await screen.findByRole("heading", { name: "Revision 2" }))
+      .toBeVisible();
+    await act(async () => {
+      oldHistory.resolve(response({ revisions: [], events: [] }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(
+      screen.getByRole("heading", { name: "Revision 2" }),
+    ).toBeVisible());
   });
 });

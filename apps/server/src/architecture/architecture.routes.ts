@@ -138,6 +138,13 @@ function serviceError(error: unknown, reply: FastifyReply) {
       currentRevisionId: error.currentRevisionId,
     });
   }
+  if (error.code === "WORKING_STATE_CONFLICT") {
+    return reply.code(409).send({
+      code: "working_state_conflict",
+      message: "Working architecture changed. Refresh and retry.",
+      currentRevisionId: error.currentRevisionId,
+    });
+  }
   if (error.code === "ARCHITECTURE_NOT_FOUND") {
     return reply.code(404).send({
       code: "architecture_not_found",

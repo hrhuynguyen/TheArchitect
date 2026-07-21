@@ -177,7 +177,12 @@ databaseDescribe("Prisma architecture editing boundaries", () => {
       ARCHITECTURE_CURRENT_KEY,
       layout,
     );
-    await yjs.persistRoomSnapshot(room.id, initial, "architecture_fixture");
+    await yjs.persistRoomSnapshot(
+      room.id,
+      initial,
+      "architecture_fixture",
+      { kind: "protected_state", expectedProtectedState: null },
+    );
     initial.destroy();
 
     const live = await yjs.loadRoomDocument(room.id);
@@ -364,6 +369,59 @@ databaseDescribe("Prisma architecture editing boundaries", () => {
           }));
       }
 
+      const sameRevisionPayloadCaptured = deferred();
+      const releaseSameRevisionPayload = deferred();
+      const sameRevisionAutosaves = createSnapshotService({
+        persistRoomSnapshot: async (autosaveRoomId, document, reason) => {
+          const staleCandidate = cloneDocument(document);
+          sameRevisionPayloadCaptured.resolve();
+          await releaseSameRevisionPayload.promise;
+          try {
+            return await yjs.persistRoomSnapshot(
+              autosaveRoomId,
+              staleCandidate,
+              reason,
+            );
+          } finally {
+            staleCandidate.destroy();
+          }
+        },
+      });
+      sameRevisionAutosaves.track(room.id, live);
+      live.getMap("integration").set("dirty-before-operation", true);
+      await sameRevisionAutosaves.changed(room.id, live);
+      const staleSameRevisionAutosave = sameRevisionAutosaves.store(
+        room.id,
+        live,
+      );
+      await sameRevisionPayloadCaptured.promise;
+
+      const renamed = await app.inject({
+        method: "POST",
+        url: `/api/rooms/${room.id}/operations`,
+        headers: { cookie: cookie(room.id, participantA) },
+        payload: {
+          baseRevisionId,
+          operations: [{
+            type: "update_resource",
+            resourceId: "bucket",
+            changes: { name: "Uploads protected by CAS" },
+          }],
+        },
+      });
+      expect(renamed.statusCode).toBe(200);
+      releaseSameRevisionPayload.resolve();
+      await expect(staleSameRevisionAutosave).rejects.toThrow(
+        "Snapshot protected state is stale",
+      );
+      for (const client of [clientA, clientB]) {
+        expect(readState(client).architecture.architecture.resources)
+          .toContainEqual(expect.objectContaining({
+            id: "bucket",
+            name: "Uploads protected by CAS",
+          }));
+      }
+
       const stalePayloadCaptured = deferred();
       const releaseStalePayload = deferred();
       const autosaves = createSnapshotService({
@@ -509,6 +567,119 @@ databaseDescribe("Prisma architecture editing boundaries", () => {
       clientA.destroy();
       clientB.destroy();
       live.destroy();
+      await database.room.deleteMany({ where: { id: room.id } });
+    }
+  });
+
+  it("serializes concurrent authoritative edits against the same durable protected base", async () => {
+    const revisionId = randomUUID();
+    const architecture: Architecture = {
+      version: "architecture/v1",
+      requirements,
+      resources: [{
+        id: "bucket",
+        type: "S3",
+        name: "Before",
+        properties: {},
+        origin: "explicit",
+        reason: "Concurrent protected-state CAS fixture.",
+        approvalStatus: "not-required",
+      }],
+      relationships: [],
+      decisions: [],
+      unresolvedQuestions: [],
+    };
+    const layout: ArchitectureLayout = {
+      version: "architecture-layout/v1",
+      revisionId,
+      nodes: [{ resourceId: "bucket", x: 0, y: 0 }],
+    };
+    const room = await database.room.create({
+      data: {
+        mode: "shared",
+        phase: "architect",
+        ownerTokenHash: `architecture-cas-${randomUUID()}`,
+        currentRevisionId: revisionId,
+      },
+    });
+    const yjs = createYjsRepository(database as unknown as SnapshotDatabase);
+    const initial = new Y.Doc();
+    initial.getMap(ARCHITECTURE_MAP_KEY).set(ARCHITECTURE_CURRENT_KEY, {
+      version: "working-architecture/v1",
+      revisionId,
+      architecture,
+    });
+    initial.getMap(ARCHITECTURE_LAYOUT_MAP_KEY).set(
+      ARCHITECTURE_CURRENT_KEY,
+      layout,
+    );
+    const candidateA = cloneDocument(initial);
+    const candidateB = cloneDocument(initial);
+    const rename = (document: Y.Doc, name: string) => {
+      const state = readState(document);
+      document.getMap(ARCHITECTURE_MAP_KEY).set(ARCHITECTURE_CURRENT_KEY, {
+        ...state.architecture,
+        architecture: {
+          ...state.architecture.architecture,
+          resources: state.architecture.architecture.resources.map((resource) =>
+            resource.id === "bucket" ? { ...resource, name } : resource
+          ),
+        },
+      });
+    };
+    rename(candidateA, "Writer A");
+    rename(candidateB, "Writer B");
+
+    try {
+      await yjs.persistRoomSnapshot(
+        room.id,
+        initial,
+        "architecture_fixture",
+        { kind: "protected_state", expectedProtectedState: null },
+      );
+      const fence = {
+        kind: "protected_state" as const,
+        expectedProtectedState: readState(initial),
+      };
+      const results = await Promise.allSettled([
+        yjs.persistRoomSnapshot(
+          room.id,
+          candidateA,
+          "architecture_operations",
+          fence,
+        ),
+        yjs.persistRoomSnapshot(
+          room.id,
+          candidateB,
+          "architecture_operations",
+          fence,
+        ),
+      ]);
+
+      expect(results.filter(({ status }) => status === "fulfilled"))
+        .toHaveLength(1);
+      expect(results.find(({ status }) => status === "rejected"))
+        .toMatchObject({
+          status: "rejected",
+          reason: {
+            name: "SnapshotProtectedStateLostError",
+            message: "Snapshot protected state is stale",
+          },
+        });
+      expect(await database.yjsSnapshot.count({ where: { roomId: room.id } }))
+        .toBe(2);
+      const restarted = await yjs.loadRoomDocument(room.id);
+      try {
+        expect(["Writer A", "Writer B"]).toContain(
+          readState(restarted).architecture.architecture.resources[0]?.name,
+        );
+      } finally {
+        restarted.destroy();
+      }
+    } finally {
+      initial.destroy();
+      candidateA.destroy();
+      candidateB.destroy();
       await database.room.deleteMany({ where: { id: room.id } });
     }
   });

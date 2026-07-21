@@ -248,10 +248,23 @@ describe("authenticated architecture routes", () => {
     }
   });
 
-  it("maps stale bases to 409 and invalid state or layout to 422", async () => {
-    for (const [error, expectedStatus] of [
-      [new ArchitectureServiceError("STALE_REVISION", "revision-newer"), 409],
-      [new ArchitectureServiceError("INVALID_LAYOUT"), 422],
+  it("maps stale and working-state conflicts to 409 and invalid layout to 422", async () => {
+    for (const [error, expectedStatus, expectedCode] of [
+      [
+        new ArchitectureServiceError("STALE_REVISION", "revision-newer"),
+        409,
+        "stale_revision",
+      ],
+      [
+        new ArchitectureServiceError("WORKING_STATE_CONFLICT", "revision-a"),
+        409,
+        "working_state_conflict",
+      ],
+      [
+        new ArchitectureServiceError("INVALID_LAYOUT"),
+        422,
+        "invalid_architecture_request",
+      ],
     ] as const) {
       const { app } = setup({ operationError: error });
       try {
@@ -263,7 +276,7 @@ describe("authenticated architecture routes", () => {
         });
         expect(response.statusCode).toBe(expectedStatus);
         expect(response.json()).toMatchObject({
-          code: expectedStatus === 409 ? "stale_revision" : "invalid_architecture_request",
+          code: expectedCode,
         });
         expect(response.json()).not.toHaveProperty("stack");
       } finally {

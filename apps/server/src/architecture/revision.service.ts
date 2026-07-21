@@ -15,16 +15,22 @@ import { randomUUID } from "node:crypto";
 import * as Y from "yjs";
 
 import type { ActiveDocumentRegistry } from "../collab/active-document.registry.js";
+import {
+  SnapshotProtectedStateLostError,
+  type SnapshotProtectedStateFence,
+} from "../collab/yjs.repository.js";
 import type { RevisionRepository } from "./revision.repository.js";
 
 export type ArchitectureServiceErrorCode =
   | "STALE_REVISION"
+  | "WORKING_STATE_CONFLICT"
   | "ARCHITECTURE_NOT_FOUND"
   | "INVALID_ARCHITECTURE_STATE"
   | "INVALID_LAYOUT";
 
 const ERROR_MESSAGES: Record<ArchitectureServiceErrorCode, string> = {
   STALE_REVISION: "Architecture revision is stale.",
+  WORKING_STATE_CONFLICT: "Working architecture changed. Refresh and retry.",
   ARCHITECTURE_NOT_FOUND: "Architecture was not found.",
   INVALID_ARCHITECTURE_STATE: "Working architecture state is invalid.",
   INVALID_LAYOUT: "Architecture layout is invalid.",
@@ -52,6 +58,7 @@ type RevisionServiceOptions = Readonly<{
     roomId: string,
     document: Y.Doc,
     reason: string,
+    fence: SnapshotProtectedStateFence,
   ): Promise<number>;
   applyUpdate?: typeof Y.applyUpdate;
   createId?: () => string;
@@ -185,12 +192,24 @@ export function createRevisionService({
           input.roomId,
           candidate,
           "architecture_operations",
+          {
+            kind: "protected_state",
+            expectedProtectedState: state,
+          },
         );
         const delta = Y.encodeStateAsUpdate(
           candidate,
           Y.encodeStateVector(live),
         );
         applyUpdate(live, delta, "architect/server-operations");
+      } catch (error) {
+        if (error instanceof SnapshotProtectedStateLostError) {
+          throw new ArchitectureServiceError(
+            "WORKING_STATE_CONFLICT",
+            state.architecture.revisionId,
+          );
+        }
+        throw error;
       } finally {
         candidate.destroy();
       }

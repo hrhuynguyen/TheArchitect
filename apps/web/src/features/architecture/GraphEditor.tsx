@@ -34,6 +34,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type * as Y from "yjs";
@@ -131,29 +132,39 @@ export function GraphEditor({
   const [selectedRelationshipId, setSelectedRelationshipId] = useState<string | null>(null);
   const [revisionRationale, setRevisionRationale] = useState("");
   const [resourceName, setResourceName] = useState("");
+  const historyRequestGeneration = useRef(0);
 
   const refreshHistory = useCallback(async () => {
-    let response: Response;
+    const generation = ++historyRequestGeneration.current;
     try {
-      response = await fetchBoundary(
-        `/api/rooms/${encodeURIComponent(roomId)}/revisions`,
-        { credentials: "same-origin" },
+      let response: Response;
+      try {
+        response = await fetchBoundary(
+          `/api/rooms/${encodeURIComponent(roomId)}/revisions`,
+          { credentials: "same-origin" },
+        );
+      } catch {
+        throw new PublicEditorError("Architecture history could not be reached.");
+      }
+      const body = await jsonBody(
+        response,
+        "Architecture history returned an invalid response.",
       );
-    } catch {
-      throw new PublicEditorError("Architecture history could not be reached.");
+      if (!response.ok) {
+        throw new PublicEditorError("Architecture history could not be loaded.");
+      }
+      const parsed = RevisionHistoryResponseSchema.safeParse(body);
+      if (!parsed.success) {
+        throw new PublicEditorError(
+          "Architecture history returned an invalid response.",
+        );
+      }
+      if (generation === historyRequestGeneration.current) {
+        setHistory(parsed.data);
+      }
+    } catch (error) {
+      if (generation === historyRequestGeneration.current) throw error;
     }
-    const body = await jsonBody(
-      response,
-      "Architecture history returned an invalid response.",
-    );
-    if (!response.ok) {
-      throw new PublicEditorError("Architecture history could not be loaded.");
-    }
-    const parsed = RevisionHistoryResponseSchema.safeParse(body);
-    if (!parsed.success) {
-      throw new PublicEditorError("Architecture history returned an invalid response.");
-    }
-    setHistory(parsed.data);
   }, [fetchBoundary, roomId]);
 
   useEffect(() => {
@@ -193,6 +204,25 @@ export function GraphEditor({
     collaboration.provider.on("synced", receiveSynced);
     collaboration.provider.on("status", receiveStatus);
     if (collaboration.provider.synced) syncState();
+
+    return () => {
+      active = false;
+      historyRequestGeneration.current += 1;
+      architectureMap.unobserve(syncState);
+      layoutMap.unobserve(syncState);
+      collaboration.provider.off("synced", receiveSynced);
+      collaboration.provider.off("status", receiveStatus);
+      collaboration.destroy();
+    };
+  }, [createCollaboration, refreshHistory, roomId]);
+
+  const observedRevisionId = editor.status === "ready"
+    ? editor.state.architecture.revisionId
+    : null;
+
+  useEffect(() => {
+    if (!observedRevisionId) return;
+    let active = true;
     void refreshHistory().catch((error: unknown) => {
       if (active) {
         setRequestError(
@@ -202,16 +232,11 @@ export function GraphEditor({
         );
       }
     });
-
     return () => {
       active = false;
-      architectureMap.unobserve(syncState);
-      layoutMap.unobserve(syncState);
-      collaboration.provider.off("synced", receiveSynced);
-      collaboration.provider.off("status", receiveStatus);
-      collaboration.destroy();
+      historyRequestGeneration.current += 1;
     };
-  }, [createCollaboration, refreshHistory, roomId]);
+  }, [observedRevisionId, refreshHistory]);
 
   const submitOperations = useCallback(async (
     state: ReconstructionYjsState,
@@ -412,7 +437,6 @@ export function GraphEditor({
         throw new PublicEditorError("Revision save returned an invalid response.");
       }
       setRevisionRationale("");
-      await refreshHistory();
     } catch (error) {
       setRequestError(
         error instanceof PublicEditorError

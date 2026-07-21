@@ -9,6 +9,7 @@ import * as Y from "yjs";
 import { describe, expect, it, vi } from "vitest";
 
 import { createActiveDocumentRegistry } from "../collab/active-document.registry.js";
+import { SnapshotProtectedStateLostError } from "../collab/yjs.repository.js";
 import {
   ArchitectureServiceError,
   createRevisionService,
@@ -77,6 +78,7 @@ async function setup(options: {
   const deactivate = await documents.activate("room-a", live);
   const events: string[] = [];
   const persisted: Uint8Array[] = [];
+  const persistenceFences: unknown[] = [];
   const revision = {
     id: "revision-b",
     roomId: "room-a",
@@ -137,9 +139,10 @@ async function setup(options: {
     documents,
     repository,
     createId: () => ["revision-b", "event-b"][id++] ?? `id-${id}`,
-    async persistRoomSnapshot(_roomId, candidate, reason) {
+    async persistRoomSnapshot(_roomId, candidate, reason, fence) {
       events.push(`persist:${reason}`);
       if (options.persistFailure) throw options.persistFailure;
+      persistenceFences.push(fence);
       persisted.push(Y.encodeStateAsUpdate(candidate));
       return persisted.length;
     },
@@ -155,6 +158,7 @@ async function setup(options: {
     live,
     original,
     persisted,
+    persistenceFences,
     repository,
     service,
     async stop() {
@@ -199,6 +203,10 @@ describe("revision service", () => {
         "persist:architecture_operations",
         "publish:architect/server-operations",
       ]);
+      expect(test.persistenceFences).toEqual([{
+        kind: "protected_state",
+        expectedProtectedState: initialState,
+      }]);
       expect(liveState(test.live)).toEqual(result.state);
     } finally {
       await test.stop();
@@ -343,6 +351,25 @@ describe("revision service", () => {
         actual.destroy();
         expected.destroy();
       }
+    } finally {
+      await test.stop();
+    }
+  });
+
+  it("maps a protected-state CAS loss to a stable working-state conflict", async () => {
+    const test = await setup({
+      persistFailure: new SnapshotProtectedStateLostError(),
+    });
+    try {
+      await expect(test.service.applyOperations({
+        roomId: "room-a",
+        request: { baseRevisionId: "revision-a", operations: [addQueue] },
+      })).rejects.toEqual(new ArchitectureServiceError(
+        "WORKING_STATE_CONFLICT",
+        "revision-a",
+      ));
+      expect(test.events).toEqual(["persist:architecture_operations"]);
+      expect(liveState(test.live)).toEqual(initialState);
     } finally {
       await test.stop();
     }
