@@ -185,6 +185,8 @@ Core records are:
 - `ArchitectureRevision`: immutable semantic graph, view layout, requirements, provenance, author, rationale
 - `HistoryEvent`: decision, change, deployment, or system event with actor and status
 - `AiRun`: provider, model, task, trace ID, timing, status, token metadata, redacted error
+- `ArchitectProposal`: server-owned operation batch tied to an immutable base revision and review state
+- `TransitionJob`: idempotent readiness/reconstruction claim tied to a room and source revision
 - `DeployJob`: target, revision, state, stack identity, region, approval facts, timestamps
 - `DeployLog`: ordered, redacted job log entries
 
