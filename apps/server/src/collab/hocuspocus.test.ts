@@ -527,6 +527,23 @@ function createCollaborationDatabase() {
         return participant?.roomId === input.where.roomId ? participant : null;
       },
     },
+    room: {
+      async findUnique(input: { where: { id: string } }) {
+        if (input.where.id !== roomId) return null;
+        return {
+          id: roomId,
+          phase: participants.get(participantId)?.room.phase ??
+            participants.get(participantBId)?.room.phase ??
+            "sketch",
+          currentRevisionId: null,
+        };
+      },
+    },
+    transitionJob: {
+      async findFirst() {
+        return null;
+      },
+    },
     yjsSnapshot: {
       async findFirst(input: { where: { roomId: string } }) {
         return (

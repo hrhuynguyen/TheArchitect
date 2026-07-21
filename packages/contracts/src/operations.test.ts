@@ -130,7 +130,6 @@ describe("GraphOperation contracts", () => {
           approvalStatus: "not-required" as const,
         },
       }],
-      layout: state.layout,
     };
 
     expect(ArchitectureOperationRequestSchema.parse(request)).toEqual(request);
@@ -151,8 +150,22 @@ describe("GraphOperation contracts", () => {
     expect(ArchitectureOperationRequestSchema.safeParse({
       baseRevisionId: "revision-a",
       operations: [],
-      layout: state.layout,
+      layout: {
+        ...state.layout,
+        nodes: [{ resourceId: "queue", x: 20, y: 40 }],
+      },
     }).success).toBe(true);
+    expect(ArchitectureOperationRequestSchema.safeParse({
+      baseRevisionId: "revision-a",
+      operations: [],
+      layout: {
+        ...state.layout,
+        nodes: [
+          { resourceId: "queue", x: 20, y: 40 },
+          { resourceId: "bucket", x: 80, y: 100 },
+        ],
+      },
+    }).success).toBe(false);
     expect(ArchitectureOperationRequestSchema.safeParse({
       baseRevisionId: "revision-a",
       operations: [],

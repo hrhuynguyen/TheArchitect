@@ -24,7 +24,9 @@ import {
   Position,
   ReactFlow,
   type Connection,
+  type EdgeChange,
   type EdgeMouseHandler,
+  type NodeChange,
   type NodeMouseHandler,
   type NodeProps,
 } from "@xyflow/react";
@@ -38,7 +40,6 @@ import type * as Y from "yjs";
 
 import { createRoomCollab } from "../workspace/collab";
 import {
-  applyLayoutChange,
   layoutFromNodes,
   toReactFlowGraph,
   type ArchitectureNode,
@@ -215,14 +216,14 @@ export function GraphEditor({
   const submitOperations = useCallback(async (
     state: ReconstructionYjsState,
     operations: readonly GraphOperation[],
-    layout = state.layout,
+    layout?: ReconstructionYjsState["layout"],
   ) => {
     setBusy(true);
     setRequestError(null);
     const request: ArchitectureOperationRequest = {
       baseRevisionId: state.architecture.revisionId,
       operations: [...operations],
-      layout,
+      ...(layout ? { layout } : {}),
     };
     try {
       const response = await fetchBoundary(
@@ -250,7 +251,6 @@ export function GraphEditor({
       if (!response.ok) {
         throw new PublicEditorError("Architecture update could not be saved.");
       }
-      setEditor({ status: "ready", state: parsed.data.state });
     } catch (error) {
       setRequestError(
         error instanceof PublicEditorError
@@ -280,6 +280,22 @@ export function GraphEditor({
     setSelectedResourceId(null);
   }, []);
 
+  const onSelectionChange = useCallback((selection: Readonly<{
+    nodes: ArchitectureNode[];
+    edges: Array<{ id: string }>;
+  }>) => {
+    const node = selection.nodes.at(-1);
+    if (node) {
+      setSelectedResourceId(node.id);
+      setSelectedRelationshipId(null);
+      setResourceName(node.data.resource.name);
+      return;
+    }
+    const edge = selection.edges.at(-1);
+    setSelectedResourceId(null);
+    setSelectedRelationshipId(edge?.id ?? null);
+  }, []);
+
   if (editor.status === "error") {
     return <div className="architecture-state"><p role="alert">{editor.message}</p></div>;
   }
@@ -298,7 +314,6 @@ export function GraphEditor({
 
   const addResource = (resourceType: AwsResourceType) => {
     const resourceId = createId();
-    const positionIndex = architecture.resources.length;
     void submitOperations(
       state,
       [{
@@ -313,17 +328,6 @@ export function GraphEditor({
           approvalStatus: "not-required",
         },
       }],
-      {
-        ...state.layout,
-        nodes: [
-          ...state.layout.nodes,
-          {
-            resourceId,
-            x: (positionIndex % 4) * 260,
-            y: Math.floor(positionIndex / 4) * 180 + 40,
-          },
-        ],
-      },
     );
   };
 
@@ -408,17 +412,6 @@ export function GraphEditor({
         throw new PublicEditorError("Revision save returned an invalid response.");
       }
       setRevisionRationale("");
-      setEditor({
-        status: "ready",
-        state: {
-          architecture: {
-            version: "working-architecture/v1",
-            revisionId: parsed.data.revision.id,
-            architecture: parsed.data.revision.architecture,
-          },
-          layout: parsed.data.revision.layout,
-        },
-      });
       await refreshHistory();
     } catch (error) {
       setRequestError(
@@ -451,14 +444,49 @@ export function GraphEditor({
             nodes={graph.nodes}
             onConnect={connect}
             onEdgeClick={onEdgeClick}
-            onNodeClick={onNodeClick}
-            onNodeDragStop={(_event, node) => {
-              void submitOperations(
-                state,
-                [],
-                applyLayoutChange(state.layout, node),
-              );
+            onEdgesChange={(changes: EdgeChange[]) => {
+              for (const change of changes) {
+                if (change.type !== "select") continue;
+                if (change.selected) {
+                  setSelectedRelationshipId(change.id);
+                  setSelectedResourceId(null);
+                } else if (selectedRelationshipId === change.id) {
+                  setSelectedRelationshipId(null);
+                }
+              }
             }}
+            onNodeClick={onNodeClick}
+            onNodesChange={(changes: NodeChange<ArchitectureNode>[]) => {
+              for (const change of changes) {
+                if (change.type === "select") {
+                  if (change.selected) {
+                    const node = graph.nodes.find(({ id }) => id === change.id);
+                    if (node) {
+                      setSelectedResourceId(node.id);
+                      setSelectedRelationshipId(null);
+                      setResourceName(node.data.resource.name);
+                    }
+                  } else if (selectedResourceId === change.id) {
+                    setSelectedResourceId(null);
+                  }
+                  continue;
+                }
+                if (
+                  change.type !== "position" ||
+                  !change.position ||
+                  change.dragging
+                ) continue;
+                void submitOperations(
+                  state,
+                  [],
+                  layoutFromNodes(state.architecture.revisionId, [{
+                    id: change.id,
+                    position: change.position,
+                  }]),
+                );
+              }
+            }}
+            onSelectionChange={onSelectionChange}
           >
             <Background />
             <MiniMap pannable zoomable />

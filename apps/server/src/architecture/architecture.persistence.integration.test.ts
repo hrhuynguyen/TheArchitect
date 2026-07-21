@@ -16,6 +16,7 @@ import { participantCookieName } from "../auth/cookies.js";
 import { signParticipant } from "../auth/participant.js";
 import { createActiveDocumentRegistry } from "../collab/active-document.registry.js";
 import { assertClientDocumentUpdateAllowed } from "../collab/protected-document.js";
+import { createSnapshotService } from "../collab/snapshot.service.js";
 import type { SnapshotDatabase } from "../collab/yjs.repository.js";
 import { registerArchitectureRoutes } from "./architecture.routes.js";
 import { createRevisionRepository } from "./revision.repository.js";
@@ -48,6 +49,14 @@ function cloneDocument(document: Y.Doc) {
   const clone = new Y.Doc();
   Y.applyUpdate(clone, Y.encodeStateAsUpdate(document));
   return clone;
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 function readState(document: Y.Doc) {
@@ -309,10 +318,7 @@ databaseDescribe("Prisma architecture editing boundaries", () => {
 
       const movedLayout = {
         ...readState(clientB).layout,
-        nodes: [
-          { resourceId: "bucket", x: 40, y: 80 },
-          { resourceId: "replica", x: 260, y: 40 },
-        ],
+        nodes: [{ resourceId: "bucket", x: 40, y: 80 }],
       };
       const moved = await app.inject({
         method: "POST",
@@ -325,11 +331,31 @@ databaseDescribe("Prisma architecture editing boundaries", () => {
         },
       });
       expect(moved.statusCode).toBe(200);
+      const independentlyMoved = await app.inject({
+        method: "POST",
+        url: `/api/rooms/${room.id}/operations`,
+        headers: { cookie: cookie(room.id, participantA) },
+        payload: {
+          baseRevisionId,
+          operations: [],
+          layout: {
+            version: "architecture-layout/v1",
+            revisionId: baseRevisionId,
+            nodes: [{ resourceId: "replica", x: 520, y: 120 }],
+          },
+        },
+      });
+      expect(independentlyMoved.statusCode).toBe(200);
       for (const client of [clientA, clientB]) {
         expect(readState(client).layout.nodes).toContainEqual({
           resourceId: "bucket",
           x: 40,
           y: 80,
+        });
+        expect(readState(client).layout.nodes).toContainEqual({
+          resourceId: "replica",
+          x: 520,
+          y: 120,
         });
         expect(readState(client).architecture.architecture.resources)
           .toContainEqual(expect.objectContaining({
@@ -337,6 +363,30 @@ databaseDescribe("Prisma architecture editing boundaries", () => {
             name: "Uploads",
           }));
       }
+
+      const stalePayloadCaptured = deferred();
+      const releaseStalePayload = deferred();
+      const autosaves = createSnapshotService({
+        persistRoomSnapshot: async (autosaveRoomId, document, reason) => {
+          const staleCandidate = cloneDocument(document);
+          stalePayloadCaptured.resolve();
+          await releaseStalePayload.promise;
+          try {
+            return await yjs.persistRoomSnapshot(
+              autosaveRoomId,
+              staleCandidate,
+              reason,
+            );
+          } finally {
+            staleCandidate.destroy();
+          }
+        },
+      });
+      autosaves.track(room.id, live);
+      live.getMap("integration").set("dirty-before-revision", true);
+      await autosaves.changed(room.id, live);
+      const staleAutosave = autosaves.store(room.id, live);
+      await stalePayloadCaptured.promise;
 
       const saved = await app.inject({
         method: "POST",
@@ -363,6 +413,10 @@ databaseDescribe("Prisma architecture editing boundaries", () => {
         },
       });
       const newRevisionId = savedBody.revision.id as string;
+      releaseStalePayload.resolve();
+      await expect(staleAutosave).rejects.toThrow(
+        "Snapshot architecture revision is stale",
+      );
       for (const client of [clientA, clientB]) {
         expect(readState(client)).toMatchObject({
           architecture: { revisionId: newRevisionId },

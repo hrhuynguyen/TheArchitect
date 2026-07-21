@@ -97,22 +97,34 @@ function layoutForOperation(
   architectureResourceIds: ReadonlySet<string>,
   suppliedLayout: unknown,
 ) {
-  const parsed = ArchitectureLayoutSchema.safeParse(
-    suppliedLayout ?? {
-      ...state.layout,
-      nodes: state.layout.nodes.filter((node) =>
-        architectureResourceIds.has(node.resourceId),
-      ),
-    },
+  const retainedNodes = state.layout.nodes.filter((node) =>
+    architectureResourceIds.has(node.resourceId)
   );
+  if (suppliedLayout === undefined) {
+    return ArchitectureLayoutSchema.parse({
+      ...state.layout,
+      nodes: retainedNodes,
+    });
+  }
+  const patch = ArchitectureLayoutSchema.safeParse(suppliedLayout);
   if (
-    !parsed.success ||
-    parsed.data.revisionId !== state.architecture.revisionId ||
-    parsed.data.nodes.some((node) => !architectureResourceIds.has(node.resourceId))
+    !patch.success ||
+    patch.data.revisionId !== state.architecture.revisionId ||
+    patch.data.nodes.length !== 1 ||
+    !architectureResourceIds.has(patch.data.nodes[0]!.resourceId)
   ) {
     throw new ArchitectureServiceError("INVALID_LAYOUT");
   }
-  return parsed.data;
+  const moved = patch.data.nodes[0]!;
+  const found = retainedNodes.some((node) => node.resourceId === moved.resourceId);
+  return ArchitectureLayoutSchema.parse({
+    ...state.layout,
+    nodes: found
+      ? retainedNodes.map((node) =>
+          node.resourceId === moved.resourceId ? moved : node
+        )
+      : [...retainedNodes, moved],
+  });
 }
 
 export function createRevisionService({

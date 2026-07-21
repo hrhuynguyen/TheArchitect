@@ -188,10 +188,7 @@ describe("revision service", () => {
           layout: {
             version: "architecture-layout/v1",
             revisionId: "revision-a",
-            nodes: [
-              { resourceId: "bucket", x: 10, y: 20 },
-              { resourceId: "queue", x: 30, y: 40 },
-            ],
+            nodes: [{ resourceId: "queue", x: 30, y: 40 }],
           },
         },
       });
@@ -233,6 +230,50 @@ describe("revision service", () => {
       expect(test.events).toEqual([
         "persist:architecture_operations",
         "publish:architect/server-operations",
+      ]);
+    } finally {
+      await test.stop();
+    }
+  });
+
+  it("merges stale single-node layout patches so concurrent moves both survive", async () => {
+    const test = await setup();
+    try {
+      await test.service.applyOperations({
+        roomId: "room-a",
+        request: {
+          baseRevisionId: "revision-a",
+          operations: [addQueue],
+        },
+      });
+      await test.service.applyOperations({
+        roomId: "room-a",
+        request: {
+          baseRevisionId: "revision-a",
+          operations: [],
+          layout: {
+            version: "architecture-layout/v1",
+            revisionId: "revision-a",
+            nodes: [{ resourceId: "bucket", x: 40, y: 80 }],
+          },
+        },
+      });
+      await test.service.applyOperations({
+        roomId: "room-a",
+        request: {
+          baseRevisionId: "revision-a",
+          operations: [],
+          layout: {
+            version: "architecture-layout/v1",
+            revisionId: "revision-a",
+            nodes: [{ resourceId: "queue", x: 300, y: 120 }],
+          },
+        },
+      });
+
+      expect(liveState(test.live).layout.nodes).toEqual([
+        { resourceId: "bucket", x: 40, y: 80 },
+        { resourceId: "queue", x: 300, y: 120 },
       ]);
     } finally {
       await test.stop();

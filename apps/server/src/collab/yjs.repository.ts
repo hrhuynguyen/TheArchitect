@@ -1,3 +1,9 @@
+import {
+  ARCHITECTURE_CURRENT_KEY,
+  ARCHITECTURE_LAYOUT_MAP_KEY,
+  ARCHITECTURE_MAP_KEY,
+  ReconstructionYjsStateSchema,
+} from "@architect/contracts";
 import * as Y from "yjs";
 import { prisma } from "../db/client.js";
 
@@ -23,18 +29,29 @@ type SnapshotModel = {
 };
 
 type SnapshotTransaction = {
+  room: {
+    findUnique(input: {
+      where: { id: string };
+      select: { id: true; phase: true; currentRevisionId: true };
+    }): Promise<{
+      id: string;
+      phase: "sketch" | "reconstructing" | "architect" | "deploy";
+      currentRevisionId: string | null;
+    } | null>;
+  };
   yjsSnapshot: Pick<SnapshotModel, "aggregate" | "create">;
   transitionJob: {
     findFirst(input: {
       where: {
-        id: string;
+        id?: string;
         roomId: string;
-        state: SnapshotLeaseFence["expectedState"];
-        leaseToken: string;
-        leaseExpiresAt: { gt: Date };
+        state?: SnapshotLeaseFence["expectedState"];
+        leaseToken?: string;
+        leaseExpiresAt?: { gt: Date };
+        architectureRevisionId?: { not: null };
       };
-      select: { id: true };
-    }): Promise<{ id: string } | null>;
+      select: { id: true; architectureRevisionId: true };
+    }): Promise<{ id: string; architectureRevisionId: string | null } | null>;
   };
 };
 
@@ -62,12 +79,35 @@ export class SnapshotLeaseLostError extends Error {
   }
 }
 
+export class SnapshotRevisionLostError extends Error {
+  constructor() {
+    super("Snapshot architecture revision is stale");
+    this.name = "SnapshotRevisionLostError";
+  }
+}
+
 const MAX_WRITE_ATTEMPTS = 8;
 
 function retryableVersionRace(error: unknown): boolean {
   if (!error || typeof error !== "object" || !("code" in error)) return false;
   const code = (error as { code?: unknown }).code;
   return code === "P2002" || code === "P2034";
+}
+
+function architectureRevision(document: Y.Doc): string | null {
+  const architecture = document
+    .getMap(ARCHITECTURE_MAP_KEY)
+    .get(ARCHITECTURE_CURRENT_KEY);
+  const layout = document
+    .getMap(ARCHITECTURE_LAYOUT_MAP_KEY)
+    .get(ARCHITECTURE_CURRENT_KEY);
+  if (architecture === undefined && layout === undefined) return null;
+  const parsed = ReconstructionYjsStateSchema.safeParse({
+    architecture,
+    layout,
+  });
+  if (!parsed.success) throw new SnapshotRevisionLostError();
+  return parsed.data.architecture.revisionId;
 }
 
 export function createYjsRepository(
@@ -95,14 +135,19 @@ export function createYjsRepository(
       reason: string,
       fence?: SnapshotLeaseFence,
     ): Promise<number> {
+      const candidateRevisionId = architectureRevision(document);
       const payload = Buffer.from(Y.encodeStateAsUpdate(document));
 
       for (let attempt = 1; attempt <= MAX_WRITE_ATTEMPTS; attempt += 1) {
         try {
           return await database.$transaction(
             async (transaction) => {
+              let activeLease: {
+                id: string;
+                architectureRevisionId: string | null;
+              } | null = null;
               if (fence) {
-                const activeLease = await transaction.transitionJob.findFirst({
+                activeLease = await transaction.transitionJob.findFirst({
                   where: {
                     id: fence.jobId,
                     roomId,
@@ -110,9 +155,39 @@ export function createYjsRepository(
                     leaseToken: fence.token,
                     leaseExpiresAt: { gt: now() },
                   },
-                  select: { id: true },
+                  select: { id: true, architectureRevisionId: true },
                 });
                 if (!activeLease) throw new SnapshotLeaseLostError();
+              }
+              const room = await transaction.room.findUnique({
+                where: { id: roomId },
+                select: { id: true, phase: true, currentRevisionId: true },
+              });
+              if (!room) throw new SnapshotRevisionLostError();
+              if (room.currentRevisionId !== null) {
+                if (candidateRevisionId !== room.currentRevisionId) {
+                  throw new SnapshotRevisionLostError();
+                }
+              } else if (candidateRevisionId !== null) {
+                if (
+                  fence?.expectedState !== "publishing" ||
+                  activeLease?.architectureRevisionId !== candidateRevisionId
+                ) {
+                  throw new SnapshotRevisionLostError();
+                }
+              } else if (room.phase === "reconstructing") {
+                const publishingArchitecture =
+                  await transaction.transitionJob.findFirst({
+                    where: {
+                      roomId,
+                      state: "publishing",
+                      architectureRevisionId: { not: null },
+                    },
+                    select: { id: true, architectureRevisionId: true },
+                  });
+                if (publishingArchitecture) {
+                  throw new SnapshotRevisionLostError();
+                }
               }
               const latest = await transaction.yjsSnapshot.aggregate({
                 where: { roomId },

@@ -1,5 +1,12 @@
+import {
+  ARCHITECTURE_CURRENT_KEY,
+  ARCHITECTURE_LAYOUT_MAP_KEY,
+  ARCHITECTURE_MAP_KEY,
+  defaultRequirementsProfile,
+} from "@architect/contracts";
 import * as Y from "yjs";
 import { describe, expect, it } from "vitest";
+import { createSnapshotService } from "./snapshot.service.js";
 import {
   createYjsRepository,
   type SnapshotDatabase,
@@ -9,15 +16,22 @@ import {
 function createMemoryDatabase() {
   const snapshots: SnapshotRecord[] = [];
   let createFailure: unknown;
+  let beforeTransaction: (() => void) | undefined;
+  let room = {
+    id: "room-a",
+    phase: "sketch" as "sketch" | "reconstructing" | "architect" | "deploy",
+    currentRevisionId: null as string | null,
+  };
   let lease = {
     id: "job-a",
     roomId: "room-a",
     state: "publishing",
+    architectureRevisionId: null as string | null,
     leaseToken: "lease-current",
     leaseExpiresAt: new Date("2026-07-21T12:01:00.000Z"),
   };
 
-  const database: SnapshotDatabase = {
+  const database = {
     yjsSnapshot: {
       async findFirst({ where }) {
         return (
@@ -57,23 +71,43 @@ function createMemoryDatabase() {
     },
     transitionJob: {
       async findFirst({ where }: any) {
-        return lease.id === where.id &&
+        return (where.id === undefined || lease.id === where.id) &&
             lease.roomId === where.roomId &&
-            lease.state === where.state &&
-            lease.leaseToken === where.leaseToken &&
-            lease.leaseExpiresAt > where.leaseExpiresAt.gt
-          ? { id: lease.id }
+            (where.state === undefined || lease.state === where.state) &&
+            (where.leaseToken === undefined || lease.leaseToken === where.leaseToken) &&
+            (where.leaseExpiresAt === undefined ||
+              lease.leaseExpiresAt > where.leaseExpiresAt.gt) &&
+            (where.architectureRevisionId === undefined ||
+              lease.architectureRevisionId !== null)
+          ? {
+              id: lease.id,
+              architectureRevisionId: lease.architectureRevisionId,
+            }
           : null;
       },
     },
+    room: {
+      async findUnique({ where }: { where: { id: string } }) {
+        return room.id === where.id ? { ...room } : null;
+      },
+    },
     async $transaction(callback) {
+      const hook = beforeTransaction;
+      beforeTransaction = undefined;
+      hook?.();
       return callback(database);
     },
-  };
+  } as SnapshotDatabase;
 
   return {
     database,
     snapshots,
+    beforeNextTransaction(operation: () => void) {
+      beforeTransaction = operation;
+    },
+    setRoom(value: typeof room) {
+      room = value;
+    },
     setLease(value: typeof lease) {
       lease = value;
     },
@@ -89,7 +123,94 @@ function documentWithPhase(phase: string): Y.Doc {
   return document;
 }
 
+function documentWithArchitecture(revisionId: string, name: string): Y.Doc {
+  const document = documentWithPhase("architect");
+  document.getMap(ARCHITECTURE_MAP_KEY).set(ARCHITECTURE_CURRENT_KEY, {
+    version: "working-architecture/v1",
+    revisionId,
+    architecture: {
+      version: "architecture/v1",
+      requirements: defaultRequirementsProfile(),
+      resources: [{
+        id: "bucket",
+        type: "S3",
+        name,
+        properties: {},
+        origin: "explicit",
+        reason: "Required by the durability regression fixture.",
+        approvalStatus: "not-required",
+      }],
+      relationships: [],
+      decisions: [],
+      unresolvedQuestions: [],
+    },
+  });
+  document.getMap(ARCHITECTURE_LAYOUT_MAP_KEY).set(ARCHITECTURE_CURRENT_KEY, {
+    version: "architecture-layout/v1",
+    revisionId,
+    nodes: [{ resourceId: "bucket", x: 0, y: 0 }],
+  });
+  return document;
+}
+
 describe("Yjs snapshot repository", () => {
+  it("rejects a SnapshotService payload encoded before an atomic revision commit", async () => {
+    const memory = createMemoryDatabase();
+    memory.setRoom({
+      id: "room-a",
+      phase: "architect",
+      currentRevisionId: "revision-a",
+    });
+    const repository = createYjsRepository(memory.database);
+    const live = documentWithArchitecture("revision-a", "Before");
+    const snapshots = createSnapshotService({
+      persistRoomSnapshot: repository.persistRoomSnapshot,
+    });
+    snapshots.track("room-a", live);
+    live.getMap("shared").set("dirty", true);
+    await snapshots.changed("room-a", live);
+
+    memory.beforeNextTransaction(() => {
+      const committed = documentWithArchitecture("revision-b", "After");
+      memory.snapshots.push({
+        roomId: "room-a",
+        version: 1,
+        payload: Y.encodeStateAsUpdate(committed),
+        reason: "architecture_revision",
+      });
+      memory.setRoom({
+        id: "room-a",
+        phase: "architect",
+        currentRevisionId: "revision-b",
+      });
+      live.getMap(ARCHITECTURE_MAP_KEY).set(
+        ARCHITECTURE_CURRENT_KEY,
+        committed.getMap(ARCHITECTURE_MAP_KEY).get(ARCHITECTURE_CURRENT_KEY),
+      );
+      live.getMap(ARCHITECTURE_LAYOUT_MAP_KEY).set(
+        ARCHITECTURE_CURRENT_KEY,
+        committed
+          .getMap(ARCHITECTURE_LAYOUT_MAP_KEY)
+          .get(ARCHITECTURE_CURRENT_KEY),
+      );
+      committed.destroy();
+    });
+
+    await expect(snapshots.store("room-a", live)).rejects.toThrow(
+      "Snapshot architecture revision is stale",
+    );
+    const restarted = await repository.loadRoomDocument("room-a");
+    expect(
+      restarted
+        .getMap(ARCHITECTURE_MAP_KEY)
+        .get(ARCHITECTURE_CURRENT_KEY),
+    ).toMatchObject({ revisionId: "revision-b" });
+    expect(memory.snapshots).toHaveLength(1);
+
+    restarted.destroy();
+    live.destroy();
+  });
+
   it("restores only the latest Yjs snapshot after a new process loads the room", async () => {
     const memory = createMemoryDatabase();
     const repository = createYjsRepository(memory.database);
@@ -185,10 +306,23 @@ describe("Yjs snapshot repository", () => {
 
   it("atomically rejects a stale reconstruction lease before inserting a snapshot", async () => {
     const memory = createMemoryDatabase();
+    memory.setRoom({
+      id: "room-a",
+      phase: "reconstructing",
+      currentRevisionId: null,
+    });
+    memory.setLease({
+      id: "job-a",
+      roomId: "room-a",
+      state: "publishing",
+      architectureRevisionId: "revision-a",
+      leaseToken: "lease-current",
+      leaseExpiresAt: new Date("2026-07-21T12:01:00.000Z"),
+    });
     const repository = createYjsRepository(memory.database, {
       now: () => new Date("2026-07-21T12:00:00.000Z"),
     });
-    const document = documentWithPhase("architect");
+    const document = documentWithArchitecture("revision-a", "Reconstructed");
 
     await expect(repository.persistRoomSnapshot(
       "room-a",
@@ -213,5 +347,35 @@ describe("Yjs snapshot repository", () => {
       },
     )).resolves.toBe(1);
     expect(memory.snapshots).toHaveLength(1);
+  });
+
+  it("rejects an unfenced pre-architecture snapshot after reconstruction links a revision", async () => {
+    const memory = createMemoryDatabase();
+    memory.setRoom({
+      id: "room-a",
+      phase: "reconstructing",
+      currentRevisionId: null,
+    });
+    memory.setLease({
+      id: "job-a",
+      roomId: "room-a",
+      state: "publishing",
+      architectureRevisionId: "revision-a",
+      leaseToken: "lease-current",
+      leaseExpiresAt: new Date("2026-07-21T12:01:00.000Z"),
+    });
+    const repository = createYjsRepository(memory.database);
+    const document = documentWithPhase("reconstructing");
+
+    try {
+      await expect(repository.persistRoomSnapshot(
+        "room-a",
+        document,
+        "debounced_change",
+      )).rejects.toThrow("Snapshot architecture revision is stale");
+      expect(memory.snapshots).toHaveLength(0);
+    } finally {
+      document.destroy();
+    }
   });
 });

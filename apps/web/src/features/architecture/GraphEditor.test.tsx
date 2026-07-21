@@ -18,14 +18,24 @@ vi.mock("@xyflow/react", () => ({
   Handle: () => null,
   MiniMap: () => null,
   Position: { Left: "left", Right: "right" },
-  ReactFlow: ({ nodes, onNodeDragStop }: any) => (
+  ReactFlow: ({ nodes, onNodeClick, onNodesChange }: any) => (
     <section aria-label="Architecture graph">
-      {nodes.map((node: any) => <span key={node.id}>{node.data.resource.name}</span>)}
+      {nodes.map((node: any) => (
+        <button
+          key={node.id}
+          onClick={() => onNodeClick?.({}, node)}
+          type="button"
+        >
+          {node.data.resource.name}
+        </button>
+      ))}
       <button
-        onClick={() => onNodeDragStop?.({}, {
-          ...nodes[0],
+        onClick={() => onNodesChange?.([{
+          id: nodes[0].id,
+          type: "position",
           position: { x: 40, y: 80 },
-        })}
+          dragging: false,
+        }])}
         type="button"
       >
         Simulate node move
@@ -79,6 +89,14 @@ function response(body: unknown, status = 200) {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 function setup() {
@@ -179,6 +197,9 @@ describe("GraphEditor", () => {
         },
       }],
     });
+    expect(JSON.parse(String(operationCall?.[1]?.body))).not.toHaveProperty(
+      "layout",
+    );
   });
 
   it("shows a bounded public error and remains usable after an invalid response", async () => {
@@ -196,5 +217,151 @@ describe("GraphEditor", () => {
       );
     });
     expect(screen.getByText("Uploads")).toBeVisible();
+  });
+
+  it("does not let an older HTTP operation response overwrite newer Yjs state", async () => {
+    const test = setup();
+    const operationResponse = deferred<Response>();
+    test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/revisions") && !init?.method) {
+        return response({ revisions: [], events: [] });
+      }
+      if (url.endsWith("/operations")) return operationResponse.promise;
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const user = userEvent.setup();
+    render(<GraphEditor dependencies={test.dependencies as never} roomId="room-a" />);
+
+    await user.click(await screen.findByRole("button", { name: "Uploads" }));
+    const input = screen.getByRole("textbox", { name: "Resource name" });
+    await user.clear(input);
+    await user.type(input, "HTTP older");
+    await user.click(screen.getByRole("button", { name: "Update name" }));
+    await waitFor(() => expect(test.fetchBoundary.mock.calls.some(([url]) =>
+      url.endsWith("/operations"),
+    )).toBe(true));
+
+    const websocketState = {
+      ...initialState.architecture,
+      architecture: {
+        ...architecture,
+        resources: [{ ...architecture.resources[0]!, name: "WebSocket newer" }],
+      },
+    };
+    act(() => {
+      test.doc.getMap(ARCHITECTURE_MAP_KEY).set(
+        ARCHITECTURE_CURRENT_KEY,
+        websocketState,
+      );
+    });
+    expect(screen.getByRole("button", { name: "WebSocket newer" })).toBeVisible();
+
+    operationResponse.resolve(response({
+      ok: true,
+      state: {
+        architecture: {
+          ...initialState.architecture,
+          architecture: {
+            ...architecture,
+            resources: [{ ...architecture.resources[0]!, name: "HTTP older" }],
+          },
+        },
+        layout: initialState.layout,
+      },
+      diagnostics: [],
+    }));
+
+    await waitFor(() => expect(screen.queryByRole("button", {
+      name: "HTTP older",
+    })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "WebSocket newer" })).toBeVisible();
+  });
+
+  it("does not let an older revision response overwrite newer Yjs state", async () => {
+    const test = setup();
+    const saveResponse = deferred<Response>();
+    test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/revisions") && init?.method === "POST") {
+        return saveResponse.promise;
+      }
+      if (url.endsWith("/revisions") && !init?.method) {
+        return response({ revisions: [], events: [] });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const user = userEvent.setup();
+    render(<GraphEditor dependencies={test.dependencies as never} roomId="room-a" />);
+
+    await screen.findByRole("button", { name: "Uploads" });
+    await user.type(
+      screen.getByRole("textbox", { name: "Rationale" }),
+      "Preserve this revision.",
+    );
+    await user.click(screen.getByRole("button", { name: "Save revision" }));
+    await waitFor(() => expect(test.fetchBoundary.mock.calls.some(
+      ([url, init]) => url.endsWith("/revisions") && init?.method === "POST",
+    )).toBe(true));
+
+    const websocketArchitecture = {
+      ...initialState.architecture,
+      revisionId: "revision-c",
+      architecture: {
+        ...architecture,
+        resources: [{ ...architecture.resources[0]!, name: "WebSocket newest" }],
+      },
+    };
+    act(() => {
+      test.doc.getMap(ARCHITECTURE_MAP_KEY).set(
+        ARCHITECTURE_CURRENT_KEY,
+        websocketArchitecture,
+      );
+      test.doc.getMap(ARCHITECTURE_LAYOUT_MAP_KEY).set(
+        ARCHITECTURE_CURRENT_KEY,
+        { ...initialState.layout, revisionId: "revision-c" },
+      );
+    });
+
+    saveResponse.resolve(response({
+      revision: {
+        id: "revision-b",
+        roomId: "room-a",
+        version: 2,
+        architecture: {
+          ...architecture,
+          resources: [{ ...architecture.resources[0]!, name: "HTTP saved" }],
+        },
+        layout: { ...initialState.layout, revisionId: "revision-b" },
+        requirements,
+        stage: "prototype",
+        authorType: "participant",
+        authorId: "participant-a",
+        rationale: "Preserve this revision.",
+        createdAt: "2026-07-21T12:00:00.000Z",
+      },
+      event: {
+        id: "event-b",
+        roomId: "room-a",
+        kind: "architecture_revision_saved",
+        status: "succeeded",
+        actorType: "participant",
+        actorId: "participant-a",
+        title: "Architecture revision saved",
+        summary: "Preserve this revision.",
+        details: {
+          revisionId: "revision-b",
+          baseRevisionId: "revision-a",
+          version: 2,
+        },
+        traceId: "request-a",
+        createdAt: "2026-07-21T12:00:00.000Z",
+      },
+    }, 201));
+
+    await waitFor(() => expect(
+      screen.getByRole("textbox", { name: "Rationale" }),
+    ).toHaveValue(""));
+    expect(screen.queryByRole("button", { name: "HTTP saved" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "WebSocket newest" })).toBeVisible();
   });
 });

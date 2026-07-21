@@ -116,6 +116,13 @@ export const architectureOperationRequestSchema = z
         message: "A request must change the graph or its layout.",
       });
     }
+    if (request.layout && request.layout.nodes.length !== 1) {
+      context.addIssue({
+        code: "custom",
+        path: ["layout", "nodes"],
+        message: "A layout update must contain exactly one moved node.",
+      });
+    }
     if (
       request.layout &&
       request.layout.revisionId !== request.baseRevisionId
