@@ -1,9 +1,5 @@
 import type { InfrastructureIntent } from "@architect/contracts";
 import OpenAI from "openai";
-import {
-  ContentFilterFinishReasonError,
-  LengthFinishReasonError,
-} from "openai/core/error";
 import { zodTextFormat } from "openai/helpers/zod";
 import type { ResponseCreateParamsNonStreaming } from "openai/resources/responses/responses";
 import { z } from "zod";
@@ -85,6 +81,43 @@ function outputParsed(response: unknown): unknown {
   return isRecord(response) && "output_parsed" in response
     ? response.output_parsed
     : null;
+}
+
+function responseDisposition(
+  response: unknown,
+  traceId: string,
+): "accept" | "repair" {
+  if (!isRecord(response) || typeof response.status !== "string") {
+    return "accept";
+  }
+  if (response.status === "completed") return "accept";
+  if (response.status === "incomplete") {
+    const details = response.incomplete_details;
+    if (
+      isRecord(details)
+      && details.reason === "content_filter"
+    ) {
+      throw new AiRefusalError(traceId);
+    }
+    return "repair";
+  }
+  if (response.status === "failed") {
+    const error = response.error;
+    const code = isRecord(error) && typeof error.code === "string"
+      ? error.code
+      : "unknown";
+    if (code === "bio_policy" || code === "image_content_policy_violation") {
+      throw new AiRefusalError(traceId);
+    }
+    if (code === "vector_store_timeout") {
+      throw new AiTimeoutError(traceId);
+    }
+    if (code === "server_error" || code === "rate_limit_exceeded") {
+      throw new AiProviderError(traceId, "AI_PROVIDER_TRANSIENT", true);
+    }
+    throw new AiProviderError(traceId);
+  }
+  throw new AiProviderError(traceId);
 }
 
 function isTransientStatus(status: number | undefined): boolean {
@@ -187,18 +220,13 @@ export function createOpenAiProvider({
           maxRetries: execution.maxRetries,
         });
       } catch (error) {
-        if (
-          error instanceof z.ZodError
-          || error instanceof LengthFinishReasonError
-        ) {
+        if (error instanceof SyntaxError || error instanceof z.ZodError) {
           continue;
-        }
-        if (error instanceof ContentFilterFinishReasonError) {
-          throw new AiRefusalError(traceId);
         }
         throw mapOpenAiError(error, traceId);
       }
       if (hasRefusal(response)) throw new AiRefusalError(traceId);
+      if (responseDisposition(response, traceId) === "repair") continue;
       try {
         const parsed = parseOutput(outputParsed(response));
         if (parsed.success) return parsed.data;
@@ -261,10 +289,10 @@ export function createOpenAiProvider({
     );
   };
 
-  const architect = async <TInput, TOutput>(
+  const architect = async <TInput, TOutputSchema extends z.ZodObject>(
     rawInput: ArchitectTurnInput<TInput>,
-    protocol: ArchitectProtocol<TInput, TOutput>,
-  ): Promise<TOutput> => {
+    protocol: ArchitectProtocol<TInput, TOutputSchema>,
+  ): Promise<z.output<TOutputSchema>> => {
     const input = parseArchitectInput(rawInput, protocol);
     validatedConfiguration(apiKey, architectModel, input.traceId);
     const format = createFormat(
@@ -272,7 +300,7 @@ export function createOpenAiProvider({
       protocol.name,
       input.traceId,
     );
-    return runStructured<TOutput>(
+    return runStructured<z.output<TOutputSchema>>(
       input.traceId,
       (attempt) => ({
         model: architectModel,
@@ -293,7 +321,7 @@ export function createOpenAiProvider({
         ],
         text: { format },
       }),
-      (output): ParsedResult<TOutput> => {
+      (output): ParsedResult<z.output<TOutputSchema>> => {
         const result = protocol.outputSchema.safeParse(output);
         return result.success
           ? { success: true, data: result.data }

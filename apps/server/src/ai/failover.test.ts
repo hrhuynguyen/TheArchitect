@@ -22,6 +22,7 @@ import {
 const IMAGE_SENTINEL =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const RAW_SENTINEL = "RAW_APPLICATION_SECRET_MUST_NOT_ESCAPE";
+const INVALID_TRACE_SENTINEL = `RAW_TRACE_SECRET_${"x".repeat(200)}`;
 const reconstructionInput: ReconstructionInput = {
   traceId: "trace-1",
   safetyIdentifier: `opaque-${RAW_SENTINEL}`,
@@ -66,10 +67,10 @@ class StubProvider implements AiProvider {
     this.identity = vi.fn((_task: AiTask) => providerIdentity);
   }
 
-  async architect<TInput, TOutput>(
+  async architect<TInput, TOutputSchema extends z.ZodObject>(
     input: ArchitectTurnInput<TInput>,
-    protocol: ArchitectProtocol<TInput, TOutput>,
-  ): Promise<TOutput> {
+    protocol: ArchitectProtocol<TInput, TOutputSchema>,
+  ): Promise<z.output<TOutputSchema>> {
     this.architectCalls += 1;
     const output = await this.architectHandler(input);
     return protocol.outputSchema.parse(output);
@@ -298,15 +299,95 @@ describe("AI provider failover", () => {
     );
   });
 
-  it("forwards generic architect protocols through the same bounded boundary", async () => {
+  it("records a safe placeholder for an invalid reconstruction trace ID", async () => {
+    const recordTerminal = vi.fn<AiRunRecorder>(async () => undefined);
+    const primary = resolving(primaryIdentity, primaryIntent);
+    const fallback = resolving(fallbackIdentity, fallbackIntent);
+    const provider = createFailoverProvider(primary, fallback, { recordTerminal });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      await expect(
+        provider.reconstruct({
+          ...reconstructionInput,
+          traceId: INVALID_TRACE_SENTINEL,
+        }),
+      ).resolves.toBe(primaryIntent);
+      expect(recordTerminal).toHaveBeenCalledWith({
+        traceId: "invalid-trace-id",
+        task: "reconstruct",
+        provider: "openai",
+        model: "gpt-5.6",
+        status: "succeeded",
+      });
+      expect(JSON.stringify(recordTerminal.mock.calls[0]?.[0])).not.toContain(
+        INVALID_TRACE_SENTINEL,
+      );
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("records a safe placeholder for an invalid architect trace ID", async () => {
+    const outputSchema = z.strictObject({ response: z.string() });
     const protocol: ArchitectProtocol<
       { request: string },
-      { response: string }
+      typeof outputSchema
     > = {
       name: "fixture_turn",
       systemPrompt: "Return the fixture.",
       inputSchema: z.strictObject({ request: z.string() }),
-      outputSchema: z.strictObject({ response: z.string() }),
+      outputSchema,
+      renderInput: ({ request }) => request,
+    };
+    const primary = new StubProvider(
+      primaryIdentity,
+      async () => primaryIntent,
+      async () => ({ response: "primary architect response" }),
+    );
+    const fallback = resolving(fallbackIdentity, fallbackIntent);
+    const recordTerminal = vi.fn<AiRunRecorder>(async () => undefined);
+    const provider = createFailoverProvider(primary, fallback, { recordTerminal });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      await expect(
+        provider.architect(
+          {
+            traceId: INVALID_TRACE_SENTINEL,
+            safetyIdentifier: "opaque",
+            input: { request: "explain" },
+          },
+          protocol,
+        ),
+      ).resolves.toEqual({ response: "primary architect response" });
+      expect(recordTerminal).toHaveBeenCalledWith({
+        traceId: "invalid-trace-id",
+        task: "architect",
+        provider: "openai",
+        model: "gpt-5.6",
+        status: "succeeded",
+      });
+      expect(JSON.stringify(recordTerminal.mock.calls[0]?.[0])).not.toContain(
+        INVALID_TRACE_SENTINEL,
+      );
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("forwards generic architect protocols through the same bounded boundary", async () => {
+    const outputSchema = z.strictObject({ response: z.string() });
+    const protocol: ArchitectProtocol<
+      { request: string },
+      typeof outputSchema
+    > = {
+      name: "fixture_turn",
+      systemPrompt: "Return the fixture.",
+      inputSchema: z.strictObject({ request: z.string() }),
+      outputSchema,
       renderInput: ({ request }) => request,
     };
     const primary = new StubProvider(

@@ -18,6 +18,7 @@ import {
 
 const VALID_PNG =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const INVALID_TRACE_SENTINEL = `RAW_TRACE_SECRET_${"x".repeat(200)}`;
 
 describe("AI provider boundary", () => {
   it("accepts only finite bounded execution options", () => {
@@ -87,13 +88,37 @@ describe("AI provider boundary", () => {
     ).toThrow(AiInputError);
   });
 
+  it("replaces an invalid reconstruction trace ID in the public input error", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let error: unknown;
+    try {
+      parseReconstructionInput({
+        traceId: INVALID_TRACE_SENTINEL,
+        safetyIdentifier: "opaque",
+        imageDataUrl: VALID_PNG,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(AiInputError);
+    expect(error).toMatchObject({ traceId: "invalid-trace-id" });
+    expect(JSON.stringify(error)).not.toContain(INVALID_TRACE_SENTINEL);
+    expect(consoleError).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
   it("validates architect protocol input before rendering it", () => {
     const renderInput = vi.fn((input: { request: string }) => input.request);
-    const protocol: ArchitectProtocol<{ request: string }, { response: string }> = {
+    const outputSchema = z.strictObject({ response: z.string() });
+    const protocol: ArchitectProtocol<
+      { request: string },
+      typeof outputSchema
+    > = {
       name: "fixture_turn",
       systemPrompt: "Return a strict fixture turn.",
       inputSchema: z.strictObject({ request: z.string().min(1) }),
-      outputSchema: z.strictObject({ response: z.string() }),
+      outputSchema,
       renderInput,
     };
 
@@ -125,6 +150,42 @@ describe("AI provider boundary", () => {
       renderedInput: "explain",
     });
     expect(renderInput).toHaveBeenCalledOnce();
+  });
+
+  it("replaces an invalid architect trace ID before rendering or erroring", () => {
+    const renderInput = vi.fn((input: { request: string }) => input.request);
+    const outputSchema = z.strictObject({ response: z.string() });
+    const protocol: ArchitectProtocol<
+      { request: string },
+      typeof outputSchema
+    > = {
+      name: "fixture_turn",
+      systemPrompt: "Return a strict fixture turn.",
+      inputSchema: z.strictObject({ request: z.string() }),
+      outputSchema,
+      renderInput,
+    };
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let error: unknown;
+    try {
+      parseArchitectInput(
+        {
+          traceId: INVALID_TRACE_SENTINEL,
+          safetyIdentifier: "opaque",
+          input: { request: "explain" },
+        },
+        protocol,
+      );
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(AiInputError);
+    expect(error).toMatchObject({ traceId: "invalid-trace-id" });
+    expect(JSON.stringify(error)).not.toContain(INVALID_TRACE_SENTINEL);
+    expect(renderInput).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+    consoleError.mockRestore();
   });
 
   it("rejects every generated object schema that is not recursively closed", () => {

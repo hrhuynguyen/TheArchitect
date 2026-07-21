@@ -1,4 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { parseMessage } from "@anthropic-ai/sdk/lib/parser";
+import type {
+  Message,
+  MessageCreateParamsNonStreaming,
+  StopReason,
+} from "@anthropic-ai/sdk/resources/messages/messages";
 import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -57,17 +63,49 @@ function harness(
   return { parse, provider };
 }
 
+function rawAnthropicMessage(text: string, stopReason: StopReason): Message {
+  return {
+    id: "message-fixture",
+    type: "message",
+    role: "assistant",
+    model: "configured-anthropic-model",
+    content: [{ type: "text", text, citations: null }],
+    stop_reason: stopReason,
+    stop_sequence: null,
+    stop_details: null,
+    usage: { input_tokens: 1, output_tokens: 1 },
+  } as Message;
+}
+
+function realParserHarness(messages: Message[]) {
+  const queue = [...messages];
+  const parse = vi.fn(async (request: MessageCreateParamsNonStreaming) => {
+    const message = queue.shift();
+    if (message === undefined) throw new Error("Missing message fixture.");
+    return parseMessage(message, request, { logger: console });
+  });
+  const provider = createAnthropicProvider({
+    apiKey: `test-key-${RAW_SENTINEL}`,
+    model: "configured-anthropic-model",
+    execution: { timeoutMs: 10_000, maxRetries: 1, outputRepairAttempts: 1 },
+    client: { messages: { parse } },
+  });
+  return { parse, provider };
+}
+
+const fixtureOutputSchema = z.strictObject({
+  response: z.string(),
+  operations: z.array(z.strictObject({ kind: z.literal("fixture") })),
+});
+
 const fixtureProtocol: ArchitectProtocol<
   { request: string },
-  { response: string; operations: Array<{ kind: "fixture" }> }
+  typeof fixtureOutputSchema
 > = {
   name: "fixture_architect_turn",
   systemPrompt: "Return a strict fixture response.",
   inputSchema: z.strictObject({ request: z.string().min(1) }),
-  outputSchema: z.strictObject({
-    response: z.string(),
-    operations: z.array(z.strictObject({ kind: z.literal("fixture") })),
-  }),
+  outputSchema: fixtureOutputSchema,
   renderInput: ({ request }) => JSON.stringify({ request }),
 };
 
@@ -268,6 +306,30 @@ describe("Anthropic provider", () => {
     const { parse, provider } = harness([
       new Anthropic.AnthropicError(RAW_SENTINEL),
       { parsed_output: validWireIntent, stop_reason: "end_turn", content: [] },
+    ]);
+
+    await expect(provider.reconstruct(reconstructionInput)).resolves.toMatchObject({
+      version: "infrastructure-intent/v1",
+    });
+    expect(parse).toHaveBeenCalledTimes(2);
+  });
+
+  it("repairs malformed JSON thrown by the installed Messages parser", async () => {
+    const { parse, provider } = realParserHarness([
+      rawAnthropicMessage(`{"version":`, "end_turn"),
+      rawAnthropicMessage(JSON.stringify(validWireIntent), "end_turn"),
+    ]);
+
+    await expect(provider.reconstruct(reconstructionInput)).resolves.toMatchObject({
+      version: "infrastructure-intent/v1",
+    });
+    expect(parse).toHaveBeenCalledTimes(2);
+  });
+
+  it("repairs max-token truncation before accepting parsed output", async () => {
+    const { parse, provider } = realParserHarness([
+      rawAnthropicMessage(JSON.stringify(validWireIntent), "max_tokens"),
+      rawAnthropicMessage(JSON.stringify(validWireIntent), "end_turn"),
     ]);
 
     await expect(provider.reconstruct(reconstructionInput)).resolves.toMatchObject({

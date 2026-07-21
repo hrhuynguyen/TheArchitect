@@ -1,4 +1,9 @@
 import OpenAI from "openai";
+import { parseResponse } from "openai/lib/ResponsesParser";
+import type {
+  Response,
+  ResponseCreateParamsNonStreaming,
+} from "openai/resources/responses/responses";
 import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -57,17 +62,73 @@ function harness(
   return { parse, provider };
 }
 
+function rawOpenAiResponse({
+  text,
+  status = "completed",
+  incompleteReason = null,
+  error = null,
+}: Readonly<{
+  text: string;
+  status?: Response["status"];
+  incompleteReason?: NonNullable<Response["incomplete_details"]>["reason"] | null;
+  error?: Response["error"];
+}>): Response {
+  return {
+    id: "response-fixture",
+    created_at: 0,
+    error,
+    incomplete_details:
+      incompleteReason === null ? null : { reason: incompleteReason },
+    output: [
+      {
+        id: "message-fixture",
+        type: "message",
+        role: "assistant",
+        status: status === "completed" ? "completed" : "incomplete",
+        content: [
+          {
+            type: "output_text",
+            text,
+            annotations: [],
+            logprobs: [],
+          },
+        ],
+      },
+    ],
+    status,
+  } as Response;
+}
+
+function realParserHarness(responses: Response[]) {
+  const queue = [...responses];
+  const parse = vi.fn(async (request: ResponseCreateParamsNonStreaming) => {
+    const response = queue.shift();
+    if (response === undefined) throw new Error("Missing response fixture.");
+    return parseResponse(response, request);
+  });
+  const provider = createOpenAiProvider({
+    apiKey: `test-key-${RAW_SENTINEL}`,
+    visionModel: "gpt-5.6",
+    architectModel: "gpt-5.6-architect",
+    execution: { timeoutMs: 10_000, maxRetries: 1, outputRepairAttempts: 1 },
+    client: { responses: { parse } },
+  });
+  return { parse, provider };
+}
+
+const fixtureOutputSchema = z.strictObject({
+  response: z.string(),
+  operations: z.array(z.strictObject({ kind: z.literal("fixture") })),
+});
+
 const fixtureProtocol: ArchitectProtocol<
   { request: string },
-  { response: string; operations: Array<{ kind: "fixture" }> }
+  typeof fixtureOutputSchema
 > = {
   name: "fixture_architect_turn",
   systemPrompt: "Return a strict fixture response.",
   inputSchema: z.strictObject({ request: z.string().min(1) }),
-  outputSchema: z.strictObject({
-    response: z.string(),
-    operations: z.array(z.strictObject({ kind: z.literal("fixture") })),
-  }),
+  outputSchema: fixtureOutputSchema,
   renderInput: ({ request }) => JSON.stringify({ request }),
 };
 
@@ -244,6 +305,90 @@ describe("OpenAI provider", () => {
       }),
     );
   });
+
+  it("repairs malformed JSON thrown by the installed Responses parser", async () => {
+    const { parse, provider } = realParserHarness([
+      rawOpenAiResponse({ text: `{"version":` }),
+      rawOpenAiResponse({ text: JSON.stringify(validWireIntent) }),
+    ]);
+
+    await expect(provider.reconstruct(reconstructionInput)).resolves.toMatchObject({
+      version: "infrastructure-intent/v1",
+    });
+    expect(parse).toHaveBeenCalledTimes(2);
+  });
+
+  it("repairs Zod failures thrown by the installed Responses parser", async () => {
+    const { parse, provider } = realParserHarness([
+      rawOpenAiResponse({ text: JSON.stringify({ version: "wrong" }) }),
+      rawOpenAiResponse({ text: JSON.stringify(validWireIntent) }),
+    ]);
+
+    await expect(provider.reconstruct(reconstructionInput)).resolves.toMatchObject({
+      version: "infrastructure-intent/v1",
+    });
+    expect(parse).toHaveBeenCalledTimes(2);
+  });
+
+  it("maps an incomplete content-filter response to an immediate refusal", async () => {
+    const { parse, provider } = realParserHarness([
+      rawOpenAiResponse({
+        text: RAW_SENTINEL,
+        status: "incomplete",
+        incompleteReason: "content_filter",
+      }),
+      rawOpenAiResponse({ text: JSON.stringify(validWireIntent) }),
+    ]);
+
+    const error = await provider.reconstruct(reconstructionInput).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(AiRefusalError);
+    expect(parse).toHaveBeenCalledOnce();
+    expect(JSON.stringify(error)).not.toContain(RAW_SENTINEL);
+  });
+
+  it("repairs max-output-token incompleteness before accepting output", async () => {
+    const { parse, provider } = realParserHarness([
+      rawOpenAiResponse({
+        text: JSON.stringify(validWireIntent),
+        status: "incomplete",
+        incompleteReason: "max_output_tokens",
+      }),
+      rawOpenAiResponse({ text: JSON.stringify(validWireIntent) }),
+    ]);
+
+    await expect(provider.reconstruct(reconstructionInput)).resolves.toMatchObject({
+      version: "infrastructure-intent/v1",
+    });
+    expect(parse).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["server_error", "AI_PROVIDER_TRANSIENT", true],
+    ["rate_limit_exceeded", "AI_PROVIDER_TRANSIENT", true],
+    ["invalid_prompt", "AI_PROVIDER_ERROR", false],
+  ] as const)(
+    "maps a failed Responses result with %s without output repair",
+    async (code, expectedCode, fallbackEligible) => {
+      const { parse, provider } = realParserHarness([
+        rawOpenAiResponse({
+          text: RAW_SENTINEL,
+          status: "failed",
+          error: { code, message: RAW_SENTINEL },
+        }),
+        rawOpenAiResponse({ text: JSON.stringify(validWireIntent) }),
+      ]);
+
+      const error = await provider.reconstruct(reconstructionInput).catch(
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(AiProviderError);
+      expect(error).toMatchObject({ code: expectedCode, fallbackEligible });
+      expect(parse).toHaveBeenCalledOnce();
+      expect(JSON.stringify(error)).not.toContain(RAW_SENTINEL);
+    },
+  );
 
   it("makes only the final exhausted output error fallback eligible", async () => {
     const { parse, provider } = harness([

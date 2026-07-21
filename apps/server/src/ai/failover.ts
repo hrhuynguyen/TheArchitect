@@ -1,7 +1,9 @@
+import type { z } from "zod";
 import {
   AiError,
   AiRecorderError,
   safeErrorCode,
+  sanitizeTraceId,
   type AiProvider,
   type AiRunRecorder,
   type AiRunTerminalMetadata,
@@ -82,13 +84,15 @@ export function createFailoverProvider(
   };
 
   const reconstruct = (input: ReconstructionInput) =>
-    run("reconstruct", input.traceId, (provider) => provider.reconstruct(input));
+    run("reconstruct", sanitizeTraceId(input.traceId), (provider) =>
+      provider.reconstruct(input),
+    );
 
-  const architect = <TInput, TOutput>(
+  const architect = <TInput, TOutputSchema extends z.ZodObject>(
     input: ArchitectTurnInput<TInput>,
-    protocol: ArchitectProtocol<TInput, TOutput>,
+    protocol: ArchitectProtocol<TInput, TOutputSchema>,
   ) =>
-    run("architect", input.traceId, (provider) =>
+    run("architect", sanitizeTraceId(input.traceId), (provider) =>
       provider.architect(input, protocol),
     );
 

@@ -73,6 +73,10 @@ function isRefusal(response: unknown): boolean {
   return isRecord(response) && response.stop_reason === "refusal";
 }
 
+function isTruncated(response: unknown): boolean {
+  return isRecord(response) && response.stop_reason === "max_tokens";
+}
+
 function isTransientStatus(status: number | undefined): boolean {
   return (
     status === 408
@@ -181,6 +185,7 @@ export function createAnthropicProvider({
         throw mapAnthropicError(error, traceId);
       }
       if (isRefusal(response)) throw new AiRefusalError(traceId);
+      if (isTruncated(response)) continue;
       try {
         const parsed = parseOutput(outputParsed(response));
         if (parsed.success) return parsed.data;
@@ -245,14 +250,14 @@ export function createAnthropicProvider({
     );
   };
 
-  const architect = async <TInput, TOutput>(
+  const architect = async <TInput, TOutputSchema extends z.ZodObject>(
     rawInput: ArchitectTurnInput<TInput>,
-    protocol: ArchitectProtocol<TInput, TOutput>,
-  ): Promise<TOutput> => {
+    protocol: ArchitectProtocol<TInput, TOutputSchema>,
+  ): Promise<z.output<TOutputSchema>> => {
     const input = parseArchitectInput(rawInput, protocol);
     validatedConfiguration(apiKey, model, input.traceId);
     const format = createFormat(protocol.outputSchema, input.traceId);
-    return runStructured<TOutput>(
+    return runStructured<z.output<TOutputSchema>>(
       input.traceId,
       (attempt) => ({
         model,
@@ -271,7 +276,7 @@ export function createAnthropicProvider({
         ],
         output_config: { format },
       }),
-      (output): ParsedResult<TOutput> => {
+      (output): ParsedResult<z.output<TOutputSchema>> => {
         const result = protocol.outputSchema.safeParse(output);
         return result.success
           ? { success: true, data: result.data }

@@ -13,8 +13,15 @@ const aiExecutionOptionsSchema = z.strictObject({
   outputRepairAttempts: z.number().finite().int().min(0).max(2),
 });
 
+const traceIdSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
+
 const commonAiInputSchema = z.strictObject({
-  traceId: z.string().trim().min(1).max(128),
+  traceId: traceIdSchema,
   safetyIdentifier: z
     .string()
     .min(1)
@@ -56,11 +63,14 @@ export type ArchitectTurnInput<TInput> = Readonly<{
   input: TInput;
 }>;
 
-export type ArchitectProtocol<TInput, TOutput> = Readonly<{
+export type ArchitectProtocol<
+  TInput,
+  TOutputSchema extends z.ZodObject,
+> = Readonly<{
   name: string;
   systemPrompt: string;
   inputSchema: z.ZodType<TInput>;
-  outputSchema: z.ZodType<TOutput>;
+  outputSchema: TOutputSchema;
   renderInput(input: TInput): string;
 }>;
 
@@ -74,10 +84,10 @@ export type ParsedArchitectInput<TInput> = Readonly<{
 export interface AiProvider {
   identity(task: AiTask): ProviderIdentity;
   reconstruct(input: ReconstructionInput): Promise<InfrastructureIntent>;
-  architect<TInput, TOutput>(
+  architect<TInput, TOutputSchema extends z.ZodObject>(
     input: ArchitectTurnInput<TInput>,
-    protocol: ArchitectProtocol<TInput, TOutput>,
-  ): Promise<TOutput>;
+    protocol: ArchitectProtocol<TInput, TOutputSchema>,
+  ): Promise<z.output<TOutputSchema>>;
 }
 
 export type AiRunTerminalMetadata = Readonly<{
@@ -104,15 +114,23 @@ export type AiSafeErrorCode =
   | "AI_RECORDER_ERROR"
   | "AI_UNKNOWN_ERROR";
 
+export function sanitizeTraceId(input: unknown): string {
+  const result = traceIdSchema.safeParse(input);
+  return result.success ? result.data : "invalid-trace-id";
+}
+
 export class AiError extends Error {
+  readonly traceId: string;
+
   protected constructor(
     name: string,
     readonly code: Exclude<AiSafeErrorCode, "AI_UNKNOWN_ERROR">,
     message: string,
-    readonly traceId: string,
+    traceId: string,
     readonly fallbackEligible: boolean,
   ) {
     super(message);
+    this.traceId = sanitizeTraceId(traceId);
     this.name = name;
   }
 }
@@ -234,26 +252,25 @@ function isValidPngDataUrl(value: string): boolean {
 
 export function parseReconstructionInput(input: unknown): ReconstructionInput {
   const result = reconstructionInputShapeSchema.safeParse(input);
-  const traceId =
+  const rawTraceId =
     input && typeof input === "object" && "traceId" in input
-      && typeof input.traceId === "string"
       ? input.traceId
-      : "unknown";
+      : undefined;
   if (!result.success || !isValidPngDataUrl(result.data.imageDataUrl)) {
-    throw new AiInputError(traceId);
+    throw new AiInputError(sanitizeTraceId(rawTraceId));
   }
   return Object.freeze(result.data);
 }
 
-export function parseArchitectInput<TInput, TOutput>(
+export function parseArchitectInput<TInput, TOutputSchema extends z.ZodObject>(
   input: ArchitectTurnInput<TInput>,
-  protocol: ArchitectProtocol<TInput, TOutput>,
+  protocol: ArchitectProtocol<TInput, TOutputSchema>,
 ): ParsedArchitectInput<TInput> {
   const common = commonAiInputSchema.safeParse({
     traceId: input.traceId,
     safetyIdentifier: input.safetyIdentifier,
   });
-  if (!common.success) throw new AiInputError(input.traceId || "unknown");
+  if (!common.success) throw new AiInputError(sanitizeTraceId(input.traceId));
   const parsedInput = protocol.inputSchema.safeParse(input.input);
   if (!parsedInput.success) throw new AiInputError(common.data.traceId);
   if (
