@@ -16,7 +16,12 @@ const serverEnvSchema = z.object({
   OPENAI_AGENT_MODEL: z.string().default("gpt-5.6"),
   ANTHROPIC_API_KEY: z.string().default(""),
   ANTHROPIC_MODEL: z.string().default(""),
-  ENABLE_DEBUG_ROUTES: z.coerce.boolean().default(false),
+  ENABLE_DEBUG_ROUTES: z
+    .union([
+      z.boolean(),
+      z.enum(["true", "false"]).transform((value) => value === "true"),
+    ])
+    .default(false),
   LOCALSTACK_URL: z.string().url().default("http://localhost:4566"),
   AWS_REGION: z.string().default("us-east-1"),
   AWS_ALLOWED_REGIONS: z.string().default("us-east-1"),

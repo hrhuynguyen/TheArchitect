@@ -53,4 +53,27 @@ describe("parseEnv", () => {
       }),
     ).toThrow("AWS_STACK_PREFIX");
   });
+
+  it.each([
+    ["false", false],
+    ["true", true],
+    [false, false],
+    [true, true],
+  ])("parses an explicit debug-routes value of %j", (input, expected) => {
+    expect(
+      parseEnv({
+        ...validSecrets,
+        ENABLE_DEBUG_ROUTES: input,
+      } as unknown as NodeJS.ProcessEnv).ENABLE_DEBUG_ROUTES,
+    ).toBe(expected);
+  });
+
+  it("rejects arbitrary debug-routes strings", () => {
+    expect(() =>
+      parseEnv({
+        ...validSecrets,
+        ENABLE_DEBUG_ROUTES: "anything",
+      }),
+    ).toThrow("ENABLE_DEBUG_ROUTES");
+  });
 });
