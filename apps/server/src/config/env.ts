@@ -16,6 +16,19 @@ const serverEnvSchema = z.object({
   OPENAI_AGENT_MODEL: z.string().default("gpt-5.6"),
   ANTHROPIC_API_KEY: z.string().default(""),
   ANTHROPIC_MODEL: z.string().default(""),
+  AI_PROVIDER_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(120_000)
+    .default(60_000),
+  AI_PROVIDER_MAX_RETRIES: z.coerce.number().int().min(0).max(2).default(1),
+  AI_OUTPUT_REPAIR_ATTEMPTS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(2)
+    .default(1),
   ENABLE_DEBUG_ROUTES: z
     .union([
       z.boolean(),

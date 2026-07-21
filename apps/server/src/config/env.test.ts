@@ -36,6 +36,9 @@ describe("parseEnv", () => {
       OPENAI_AGENT_MODEL: "gpt-5.6",
       ANTHROPIC_API_KEY: "",
       ANTHROPIC_MODEL: "",
+      AI_PROVIDER_TIMEOUT_MS: 60_000,
+      AI_PROVIDER_MAX_RETRIES: 1,
+      AI_OUTPUT_REPAIR_ATTEMPTS: 1,
       ENABLE_DEBUG_ROUTES: false,
       LOCALSTACK_URL: "http://localhost:4566",
       AWS_REGION: "us-east-1",
@@ -52,6 +55,22 @@ describe("parseEnv", () => {
         AWS_STACK_PREFIX: "1-invalid",
       }),
     ).toThrow("AWS_STACK_PREFIX");
+  });
+
+  it.each([
+    ["AI_PROVIDER_TIMEOUT_MS", "999"],
+    ["AI_PROVIDER_TIMEOUT_MS", "120001"],
+    ["AI_PROVIDER_MAX_RETRIES", "-1"],
+    ["AI_PROVIDER_MAX_RETRIES", "3"],
+    ["AI_OUTPUT_REPAIR_ATTEMPTS", "-1"],
+    ["AI_OUTPUT_REPAIR_ATTEMPTS", "3"],
+  ])("rejects an out-of-range %s setting", (key, value) => {
+    expect(() =>
+      parseEnv({
+        ...validSecrets,
+        [key]: value,
+      }),
+    ).toThrow(key);
   });
 
   it.each([
