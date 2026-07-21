@@ -1095,6 +1095,412 @@ describe("compileIntent", () => {
     ).toHaveLength(1);
   });
 
+  it("does not let minimal ELB inference bypass an explicit one-AZ VPC cap", () => {
+    const result = compileIntent(
+      {
+        version: "infrastructure-intent/v1",
+        resources: [
+          {
+            id: "vpc",
+            type: "VPC",
+            name: "Single-AZ VPC",
+            properties: { maxAvailabilityZones: 1 },
+          },
+          {
+            id: "ingress",
+            type: "ELB",
+            name: "Ingress",
+            zone: "public",
+            properties: {},
+          },
+        ],
+        relationships: [],
+      },
+      baseRequirements(),
+    );
+    const publicSubnets = result.architecture.resources.filter(
+      (resource) =>
+        resource.type === "Subnet" && resource.properties.subnetType === "public",
+    );
+    const ingressSubnetIds = new Set(
+      result.architecture.relationships
+        .filter(
+          (relationship) =>
+            relationship.kind === "hosts" && relationship.targetId === "ingress",
+        )
+        .map((relationship) => relationship.sourceId),
+    );
+
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        level: "error",
+        code: "VPC_AVAILABILITY_ZONE_CAP",
+        resourceId: "vpc",
+      }),
+    );
+    expect(
+      result.architecture.resources.find(
+        (resource) => resource.id === "inferred-subnet-public-secondary",
+      ),
+    ).toBeUndefined();
+    expect(publicSubnets).toHaveLength(1);
+    expect(ingressSubnetIds).toEqual(new Set([publicSubnets[0]?.id]));
+    expect(
+      result.architecture.resources.find((resource) => resource.id === "vpc")
+        ?.properties.maxAvailabilityZones,
+    ).toBe(1);
+  });
+
+  it("chooses a distinct semantic AZ when minimal ELB inference collides with the secondary label", () => {
+    const result = compileIntent(
+      {
+        version: "infrastructure-intent/v1",
+        resources: [
+          {
+            id: "vpc",
+            type: "VPC",
+            name: "Two-AZ VPC",
+            properties: { maxAvailabilityZones: 2 },
+          },
+          {
+            id: "public-secondary",
+            type: "Subnet",
+            name: "Existing secondary subnet",
+            zone: "public",
+            properties: {
+              availabilityZone: "secondary",
+              subnetType: "public",
+            },
+          },
+          {
+            id: "ingress",
+            type: "ELB",
+            name: "Ingress",
+            zone: "public",
+            properties: {},
+          },
+        ],
+        relationships: [
+          {
+            id: "vpc-contains-secondary",
+            sourceId: "vpc",
+            targetId: "public-secondary",
+            kind: "contains",
+          },
+        ],
+      },
+      baseRequirements(),
+    );
+    const publicSubnets = result.architecture.resources.filter(
+      (resource) =>
+        resource.type === "Subnet" && resource.properties.subnetType === "public",
+    );
+    const ingressSubnetIds = new Set(
+      result.architecture.relationships
+        .filter(
+          (relationship) =>
+            relationship.kind === "hosts" && relationship.targetId === "ingress",
+        )
+        .map((relationship) => relationship.sourceId),
+    );
+    const ingressAvailabilityZones = new Set(
+      publicSubnets
+        .filter((subnet) => ingressSubnetIds.has(subnet.id))
+        .map((subnet) => subnet.properties.availabilityZone ?? "primary"),
+    );
+
+    expect(publicSubnets).toHaveLength(2);
+    expect(ingressSubnetIds.size).toBe(2);
+    expect(ingressAvailabilityZones.size).toBe(2);
+    expect(
+      result.architecture.resources.find(
+        (resource) => resource.id === "inferred-subnet-public-secondary",
+      )?.properties.availabilityZone,
+    ).not.toBe("secondary");
+    expect(result.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: "VPC_AVAILABILITY_ZONE_CAP" }),
+    );
+  });
+
+  it("does not compound a colliding minimal ELB subnet during production staging", () => {
+    const result = compileIntent(
+      {
+        version: "infrastructure-intent/v1",
+        resources: [
+          {
+            id: "vpc",
+            type: "VPC",
+            name: "Two-AZ VPC",
+            properties: { maxAvailabilityZones: 2 },
+          },
+          {
+            id: "public-secondary",
+            type: "Subnet",
+            name: "Existing secondary subnet",
+            zone: "public",
+            properties: {
+              availabilityZone: "secondary",
+              subnetType: "public",
+            },
+          },
+          {
+            id: "ingress",
+            type: "ELB",
+            name: "Ingress",
+            zone: "public",
+            properties: {},
+          },
+        ],
+        relationships: [
+          {
+            id: "vpc-contains-secondary",
+            sourceId: "vpc",
+            targetId: "public-secondary",
+            kind: "contains",
+          },
+        ],
+      },
+      baseRequirements({
+        audience: "internal",
+        availability: "continuous",
+      }),
+    );
+    const publicSubnets = result.architecture.resources.filter(
+      (resource) =>
+        resource.type === "Subnet" && resource.properties.subnetType === "public",
+    );
+    const publicAvailabilityZones = new Set(
+      publicSubnets.map(
+        (subnet) => subnet.properties.availabilityZone ?? "primary",
+      ),
+    );
+
+    expect(result.stageDecision.stage).toBe("production");
+    expect(publicSubnets).toHaveLength(2);
+    expect(publicAvailabilityZones.size).toBe(2);
+    expect(
+      result.architecture.resources.some(
+        (resource) => resource.id === "stage-subnet-secondary",
+      ),
+    ).toBe(false);
+    expect(result.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: "VPC_AVAILABILITY_ZONE_CAP" }),
+    );
+  });
+
+  it("preserves contradictory explicit subnets but confines generated placement to the cap", () => {
+    const result = compileIntent(
+      {
+        version: "infrastructure-intent/v1",
+        resources: [
+          {
+            id: "vpc",
+            type: "VPC",
+            name: "Single-AZ VPC",
+            properties: { maxAvailabilityZones: 1 },
+          },
+          {
+            id: "subnet-a",
+            type: "Subnet",
+            name: "Subnet A",
+            zone: "private",
+            properties: {
+              availabilityZone: "az-a",
+              subnetType: "private",
+            },
+          },
+          {
+            id: "subnet-b",
+            type: "Subnet",
+            name: "Subnet B",
+            zone: "private",
+            properties: {
+              availabilityZone: "az-b",
+              subnetType: "private",
+            },
+          },
+          {
+            id: "app",
+            type: "EC2",
+            name: "Application",
+            zone: "private",
+            properties: {},
+          },
+        ],
+        relationships: [
+          {
+            id: "vpc-contains-a",
+            sourceId: "vpc",
+            targetId: "subnet-a",
+            kind: "contains",
+          },
+          {
+            id: "vpc-contains-b",
+            sourceId: "vpc",
+            targetId: "subnet-b",
+            kind: "contains",
+          },
+        ],
+      },
+      baseRequirements({
+        audience: "internal",
+        availability: "continuous",
+      }),
+    );
+    const computeIds = new Set(
+      result.architecture.resources
+        .filter((resource) => resource.type === "EC2")
+        .map((resource) => resource.id),
+    );
+    const computeSubnetIds = new Set(
+      result.architecture.relationships
+        .filter(
+          (relationship) =>
+            relationship.kind === "hosts" && computeIds.has(relationship.targetId),
+        )
+        .map((relationship) => relationship.sourceId),
+    );
+
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        level: "error",
+        code: "VPC_AVAILABILITY_ZONE_CAP",
+        resourceId: "vpc",
+      }),
+    );
+    expect(
+      result.architecture.resources
+        .filter((resource) => resource.type === "Subnet")
+        .map((resource) => resource.id),
+    ).toEqual(["subnet-a", "subnet-b"]);
+    expect(
+      result.architecture.relationships
+        .filter((relationship) => relationship.origin === "explicit")
+        .map((relationship) => relationship.id),
+    ).toEqual(["vpc-contains-a", "vpc-contains-b"]);
+    expect(computeSubnetIds).toEqual(new Set(["subnet-a"]));
+    expect(
+      result.architecture.resources.find((resource) => resource.id === "vpc")
+        ?.properties.maxAvailabilityZones,
+    ).toBe(1);
+
+    const beforeApproval = materializeApprovedArchitecture(result.deploymentPlan);
+    expect(
+      beforeApproval.resources
+        .filter((resource) => resource.type === "Subnet")
+        .map((resource) => resource.id),
+    ).toEqual(["subnet-a", "subnet-b"]);
+    expect(
+      beforeApproval.relationships
+        .filter((relationship) => relationship.origin === "explicit")
+        .map((relationship) => relationship.id),
+    ).toEqual(["vpc-contains-a", "vpc-contains-b"]);
+  });
+
+  it("applies every explicit VPC cap to a dual-owned placement subnet", () => {
+    const result = compileIntent(
+      {
+        version: "infrastructure-intent/v1",
+        resources: [
+          {
+            id: "capped-vpc",
+            type: "VPC",
+            name: "Capped VPC",
+            properties: { maxAvailabilityZones: 1 },
+          },
+          {
+            id: "uncapped-vpc",
+            type: "VPC",
+            name: "Uncapped VPC",
+            properties: {},
+          },
+          {
+            id: "subnet-a",
+            type: "Subnet",
+            name: "Subnet A",
+            zone: "private",
+            properties: {
+              availabilityZone: "az-a",
+              subnetType: "private",
+            },
+          },
+          {
+            id: "subnet-b",
+            type: "Subnet",
+            name: "Subnet B",
+            zone: "private",
+            properties: {
+              availabilityZone: "az-b",
+              subnetType: "private",
+            },
+          },
+          {
+            id: "app",
+            type: "EC2",
+            name: "Application",
+            zone: "private",
+            properties: {},
+          },
+        ],
+        relationships: [
+          {
+            id: "capped-contains-a",
+            sourceId: "capped-vpc",
+            targetId: "subnet-a",
+            kind: "contains",
+          },
+          {
+            id: "capped-contains-b",
+            sourceId: "capped-vpc",
+            targetId: "subnet-b",
+            kind: "contains",
+          },
+          {
+            id: "uncapped-contains-b",
+            sourceId: "uncapped-vpc",
+            targetId: "subnet-b",
+            kind: "contains",
+          },
+        ],
+      },
+      baseRequirements({
+        audience: "internal",
+        availability: "continuous",
+      }),
+    );
+    const computeIds = new Set(
+      result.architecture.resources
+        .filter((resource) => resource.type === "EC2")
+        .map((resource) => resource.id),
+    );
+    const computeSubnetIds = new Set(
+      result.architecture.relationships
+        .filter(
+          (relationship) =>
+            relationship.kind === "hosts" && computeIds.has(relationship.targetId),
+        )
+        .map((relationship) => relationship.sourceId),
+    );
+
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        level: "error",
+        code: "VPC_AVAILABILITY_ZONE_CAP",
+        resourceId: "capped-vpc",
+      }),
+    );
+    expect(computeSubnetIds).toEqual(new Set(["subnet-a"]));
+    expect(
+      result.architecture.relationships
+        .filter((relationship) => relationship.origin === "explicit")
+        .map((relationship) => relationship.id),
+    ).toEqual([
+      "capped-contains-a",
+      "capped-contains-b",
+      "uncapped-contains-b",
+    ]);
+  });
+
   it("snapshots representative prototype and production compilations", () => {
     const prototype = compileIntent(
       {

@@ -178,6 +178,45 @@ function zoneFor(resource: InfrastructureIntentResource): InfrastructureZone {
   return "regional";
 }
 
+function semanticAvailabilityZone(subnet: WorkingResource): string {
+  const availabilityZone = subnet.properties.availabilityZone;
+  return typeof availabilityZone === "string" && availabilityZone.length > 0
+    ? availabilityZone
+    : "primary";
+}
+
+function compareSemanticAvailabilityZone(left: string, right: string): number {
+  if (left === "primary") return right === "primary" ? 0 : -1;
+  if (right === "primary") return 1;
+  return compareText(left, right);
+}
+
+function selectAdditionalSemanticAvailabilityZone(
+  allSubnets: WorkingResource[],
+  occupiedSubnets: WorkingResource[],
+): string {
+  const occupiedAvailabilityZones = new Set(
+    occupiedSubnets.map(semanticAvailabilityZone),
+  );
+  const reusableAvailabilityZone = [
+    ...new Set(allSubnets.map(semanticAvailabilityZone)),
+  ]
+    .sort(compareSemanticAvailabilityZone)
+    .find(
+      (availabilityZone) =>
+        !occupiedAvailabilityZones.has(availabilityZone),
+    );
+  if (reusableAvailabilityZone) return reusableAvailabilityZone;
+
+  let availabilityZone = "secondary";
+  let suffix = 2;
+  while (occupiedAvailabilityZones.has(availabilityZone)) {
+    availabilityZone = `secondary-${suffix}`;
+    suffix += 1;
+  }
+  return availabilityZone;
+}
+
 function reconcileStageDecision(
   recommendation: StageDecision,
   architecture: Architecture,
@@ -491,6 +530,31 @@ function compileCore(
     });
   }
 
+  const initialVpcCandidates = resourcesOfType("VPC");
+  const [onlyInitialVpc] = initialVpcCandidates;
+  const singleExplicitVpcCapacity =
+    initialVpcCandidates.length === 1 &&
+    onlyInitialVpc?.origin === "explicit" &&
+    typeof onlyInitialVpc.properties.maxAvailabilityZones === "number"
+      ? {
+          maximum: onlyInitialVpc.properties.maxAvailabilityZones,
+          resource: onlyInitialVpc,
+        }
+      : undefined;
+  const requestedAvailabilityZones = new Map<string, number>();
+  const permitsAvailabilityZones = (required: number): boolean => {
+    if (!singleExplicitVpcCapacity) return true;
+    if (required <= singleExplicitVpcCapacity.maximum) return true;
+    requestedAvailabilityZones.set(
+      singleExplicitVpcCapacity.resource.id,
+      Math.max(
+        required,
+        requestedAvailabilityZones.get(singleExplicitVpcCapacity.resource.id) ?? 0,
+      ),
+    );
+    return false;
+  };
+
   if (
     resources.some((resource) => SECURITY_GROUP_TYPES.has(resource.type)) &&
     !hasType("SecurityGroup")
@@ -543,17 +607,35 @@ function compileCore(
         zone: "public",
       });
     }
-    const publicSubnetCount = resourcesOfType("Subnet").filter(
-      (resource) =>
-        resource.zone === "public" || resource.properties.subnetType === "public",
-    ).length;
-    if (hasType("ELB") && publicSubnetCount < 2) {
+    const publicAvailabilityZoneCount = new Set(
+      resourcesOfType("Subnet")
+        .filter(
+          (resource) =>
+            resource.zone === "public" ||
+            resource.properties.subnetType === "public",
+        )
+        .map(semanticAvailabilityZone),
+    ).size;
+    if (
+      hasType("ELB") &&
+      publicAvailabilityZoneCount < 2 &&
+      permitsAvailabilityZones(2)
+    ) {
+      const allSubnets = resourcesOfType("Subnet");
+      const publicSubnets = allSubnets.filter(
+        (resource) =>
+          resource.zone === "public" ||
+          resource.properties.subnetType === "public",
+      );
       addGeneratedResource({
         requestedId: "inferred-subnet-public-secondary",
         type: "Subnet",
         name: "Minimal secondary public subnet",
         properties: {
-          availabilityZone: "secondary",
+          availabilityZone: selectAdditionalSemanticAvailabilityZone(
+            allSubnets,
+            publicSubnets,
+          ),
           subnetType: "public",
         },
         origin: "inferred-minimal",
@@ -636,55 +718,55 @@ function compileCore(
     (resource) =>
       resource.zone === "public" || resource.properties.subnetType === "public",
   );
-  const needsStagedPublicSubnet = Boolean(stagedIngress) && stagedPublicSubnets.length < 2;
+  const stagedPublicAvailabilityZoneCount = new Set(
+    stagedPublicSubnets.map(semanticAvailabilityZone),
+  ).size;
+  const needsStagedPublicSubnet =
+    Boolean(stagedIngress) && stagedPublicAvailabilityZoneCount < 2;
   const stagedComputeExists = resourcesOfType("EC2").some(
     (resource) => resource.origin === "stage-upgrade",
   );
   const computeUsesPublicSubnets = primaryCompute?.zone === "public";
-  const compatibleComputeSubnetCount = resourcesOfType("Subnet").filter((resource) =>
+  const compatibleComputeSubnets = resourcesOfType("Subnet").filter((resource) =>
     computeUsesPublicSubnets
       ? resource.zone === "public" || resource.properties.subnetType === "public"
       : resource.zone !== "public" && resource.properties.subnetType !== "public",
-  ).length;
+  );
+  const compatibleComputeAvailabilityZoneCount = new Set(
+    compatibleComputeSubnets.map(semanticAvailabilityZone),
+  ).size;
   const needsStagedComputeSubnet =
-    stagedComputeExists && compatibleComputeSubnetCount < 2;
+    stagedComputeExists && compatibleComputeAvailabilityZoneCount < 2;
+  const subnetAvailabilityZoneCount = new Set(
+    resourcesOfType("Subnet").map(semanticAvailabilityZone),
+  ).size;
   const needsProductionSubnet =
     stageRecommendation.stage === "production" &&
-    resourcesOfType("Subnet").length < 2;
-  const vpcCandidates = resourcesOfType("VPC");
-  const [onlyVpcCandidate] = vpcCandidates;
-  const singleAzVpcCap =
-    vpcCandidates.length === 1 &&
-    onlyVpcCandidate?.origin === "explicit" &&
-    typeof onlyVpcCandidate.properties.maxAvailabilityZones === "number" &&
-    onlyVpcCandidate.properties.maxAvailabilityZones <= 1
-      ? onlyVpcCandidate
-      : undefined;
+    subnetAvailabilityZoneCount < 2;
   if (
     hasType("VPC") &&
     (needsStagedPublicSubnet || needsStagedComputeSubnet || needsProductionSubnet)
   ) {
-    if (singleAzVpcCap) {
-      diagnostics.push({
-        level: "error",
-        code: "VPC_AVAILABILITY_ZONE_CAP",
-        message: `${singleAzVpcCap.name} is explicitly capped at one availability zone, which blocks the ${stageRecommendation.stage} multi-zone topology.`,
-        path: `resources.${singleAzVpcCap.id}.properties.maxAvailabilityZones`,
-        resourceId: singleAzVpcCap.id,
-        suggestion:
-          "Increase maxAvailabilityZones to at least 2 or lower the workload availability requirements.",
-      });
-    } else {
+    if (permitsAvailabilityZones(2)) {
       const publicUpgrade =
         needsStagedPublicSubnet ||
         (needsStagedComputeSubnet && computeUsesPublicSubnets) ||
         directExternalComputeIds.size > 0;
+      const allSubnets = resourcesOfType("Subnet");
+      const occupiedSubnets = needsStagedPublicSubnet
+        ? stagedPublicSubnets
+        : needsStagedComputeSubnet
+          ? compatibleComputeSubnets
+          : allSubnets;
       addGeneratedResource({
         requestedId: "stage-subnet-secondary",
         type: "Subnet",
         name: "Recommended secondary subnet",
         properties: {
-          availabilityZone: "secondary",
+          availabilityZone: selectAdditionalSemanticAvailabilityZone(
+            allSubnets,
+            occupiedSubnets,
+          ),
           subnetType: publicUpgrade ? "public" : "private",
         },
         origin: "stage-upgrade",
@@ -829,6 +911,85 @@ function compileCore(
   for (const subnet of subnets) attachToVpc(subnet);
   for (const securityGroup of securityGroups) attachToVpc(securityGroup);
 
+  const subnetsById = new Map(subnets.map((subnet) => [subnet.id, subnet]));
+  const vpcIds = new Set(vpcs.map((vpc) => vpc.id));
+  const subnetOwnerIds = new Map<string, Set<string>>();
+  const containedSubnetIds = new Map<string, Set<string>>();
+  for (const relationship of relationships) {
+    if (
+      relationship.kind !== "contains" ||
+      relationship.approvalStatus === "rejected" ||
+      !vpcIds.has(relationship.sourceId) ||
+      !subnetsById.has(relationship.targetId)
+    ) {
+      continue;
+    }
+    const owners = subnetOwnerIds.get(relationship.targetId) ?? new Set<string>();
+    owners.add(relationship.sourceId);
+    subnetOwnerIds.set(relationship.targetId, owners);
+    const contained =
+      containedSubnetIds.get(relationship.sourceId) ?? new Set<string>();
+    contained.add(relationship.targetId);
+    containedSubnetIds.set(relationship.sourceId, contained);
+  }
+
+  const explicitVpcCapacities = new Map<
+    string,
+    { maximum: number; resource: WorkingResource }
+  >();
+  const allowedSubnetIdsByVpc = new Map<string, Set<string>>();
+  for (const vpc of vpcs) {
+    const maximum = vpc.properties.maxAvailabilityZones;
+    if (vpc.origin !== "explicit" || typeof maximum !== "number") continue;
+    explicitVpcCapacities.set(vpc.id, { maximum, resource: vpc });
+    const contained = [...(containedSubnetIds.get(vpc.id) ?? [])]
+      .map((subnetId) => subnetsById.get(subnetId))
+      .filter((subnet): subnet is WorkingResource => subnet !== undefined);
+    const availabilityZones = [
+      ...new Set(contained.map(semanticAvailabilityZone)),
+    ].sort(compareSemanticAvailabilityZone);
+    const requested = Math.max(
+      availabilityZones.length,
+      requestedAvailabilityZones.get(vpc.id) ?? 0,
+    );
+    if (requested > maximum) {
+      diagnostics.push({
+        level: "error",
+        code: "VPC_AVAILABILITY_ZONE_CAP",
+        message: `${vpc.name} allows ${maximum} availability zone${maximum === 1 ? "" : "s"}, but the accepted topology or workload requires ${requested}.`,
+        path: `resources.${vpc.id}.properties.maxAvailabilityZones`,
+        resourceId: vpc.id,
+        suggestion:
+          "Increase maxAvailabilityZones or reduce the topology and workload availability requirements.",
+      });
+    }
+    const allowedAvailabilityZones = new Set(
+      availabilityZones.slice(0, Math.max(0, Math.floor(maximum))),
+    );
+    allowedSubnetIdsByVpc.set(
+      vpc.id,
+      new Set(
+        contained
+          .filter((subnet) =>
+            allowedAvailabilityZones.has(semanticAvailabilityZone(subnet)),
+          )
+          .map((subnet) => subnet.id),
+      ),
+    );
+  }
+
+  const isPlacementAllowedByVpcCap = (subnet: WorkingResource): boolean => {
+    const owners = subnetOwnerIds.get(subnet.id);
+    if (!owners || owners.size === 0) return true;
+    return [...owners].every((ownerId) => {
+      if (!explicitVpcCapacities.has(ownerId)) return true;
+      return allowedSubnetIdsByVpc.get(ownerId)?.has(subnet.id) ?? false;
+    });
+  };
+  const placementSubnets = subnets.filter(isPlacementAllowedByVpcCap);
+  const placementPublicSubnets = publicSubnets.filter(isPlacementAllowedByVpcCap);
+  const placementPrivateSubnets = privateSubnets.filter(isPlacementAllowedByVpcCap);
+
   const placementOffsets = new Map<string, number>();
   for (const hosted of resources
     .filter((resource) => HOSTED_TYPES.has(resource.type))
@@ -841,8 +1002,11 @@ function compileCore(
         subnets.some((candidate) => candidate.id === relationship.sourceId),
     );
     if (!hasExplicitHosting) {
-      const preferred = hosted.zone === "public" ? publicSubnets : privateSubnets;
-      const candidates = preferred.length > 0 ? preferred : subnets;
+      const preferred =
+        hosted.zone === "public"
+          ? placementPublicSubnets
+          : placementPrivateSubnets;
+      const candidates = preferred.length > 0 ? preferred : placementSubnets;
       const placementKey = hosted.zone === "public" ? "public" : "private";
       const offset = placementOffsets.get(placementKey) ?? 0;
       const selectedSubnets =
