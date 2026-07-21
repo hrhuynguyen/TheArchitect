@@ -253,11 +253,19 @@ describe("server-authoritative vote state", () => {
 
       expect(first).toMatchObject({
         phase: "reconstructing",
-        transition: { claimed: true, jobId: "job-1" },
+        transition: {
+          claimed: true,
+          jobId: "job-1",
+          sourceSnapshotVersion: 1,
+        },
       });
       expect(replay).toMatchObject({
         phase: "reconstructing",
-        transition: { claimed: false, jobId: "job-1" },
+        transition: {
+          claimed: false,
+          jobId: "job-1",
+          sourceSnapshotVersion: 1,
+        },
       });
       expect(test.database.rooms.get(test.roomId)).toBe("reconstructing");
       expect([...test.database.jobs.values()]).toEqual([
@@ -493,8 +501,16 @@ describe("readiness transition failure and concurrency boundaries", () => {
       const first = await service.castVote(test.roomId, "participant-a", "ready");
       const replay = await service.castVote(test.roomId, "participant-a", "ready");
 
-      expect(first.transition).toEqual({ claimed: true, jobId: "job-1" });
-      expect(replay.transition).toEqual({ claimed: false, jobId: "job-1" });
+      expect(first.transition).toEqual({
+        claimed: true,
+        jobId: "job-1",
+        sourceSnapshotVersion: 1,
+      });
+      expect(replay.transition).toEqual({
+        claimed: false,
+        jobId: "job-1",
+        sourceSnapshotVersion: 1,
+      });
       expect(test.database.rooms.get(test.roomId)).toBe("reconstructing");
       expect(test.database.jobs.size).toBe(1);
       expect(test.live.getMap("meta").get("phase")).toBe("reconstructing");
@@ -596,7 +612,13 @@ describe("readiness transition failure and concurrency boundaries", () => {
 
       expect(first).toMatchObject({
         status: "fulfilled",
-        value: { transition: { claimed: true, jobId: "job-1" } },
+        value: {
+          transition: {
+            claimed: true,
+            jobId: "job-1",
+            sourceSnapshotVersion: 4,
+          },
+        },
       });
       expect(second).toMatchObject({
         status: "rejected",
@@ -909,10 +931,18 @@ describe("readiness transition failure and concurrency boundaries", () => {
         "participant-b",
         "ready",
       );
-      expect(first.transition).toEqual({ claimed: true, jobId: "job-1" });
+      expect(first.transition).toEqual({
+        claimed: true,
+        jobId: "job-1",
+        sourceSnapshotVersion: 2,
+      });
 
       const replay = await service.castVote(test.roomId, "participant-a", "ready");
-      expect(replay.transition).toEqual({ claimed: false, jobId: "job-1" });
+      expect(replay.transition).toEqual({
+        claimed: false,
+        jobId: "job-1",
+        sourceSnapshotVersion: 2,
+      });
       await expect(
         service.castVote(test.roomId, "participant-new", "ready"),
       ).rejects.toBeInstanceOf(VoteClosedError);

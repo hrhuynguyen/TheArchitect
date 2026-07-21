@@ -5,4 +5,5 @@ export * from "@architect/contracts/rooms";
 export * from "@architect/contracts/collaboration";
 export * from "@architect/contracts/infrastructure";
 export * from "@architect/contracts/requirements";
+export * from "@architect/contracts/reconstruction";
 export * from "@architect/contracts/voting";

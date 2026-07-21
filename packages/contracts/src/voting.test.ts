@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   READINESS_THRESHOLD,
+  TransitionClaimSchema,
   VoteMutationResponseSchema,
   VoteSnapshotSchema,
   evaluateVote,
@@ -136,7 +137,11 @@ describe("vote contracts", () => {
           threshold: READINESS_THRESHOLD,
           voterIds: ["participant-a"],
         },
-        transition: { claimed: true, jobId: "job-a" },
+        transition: {
+          claimed: true,
+          jobId: "job-a",
+          sourceSnapshotVersion: 7,
+        },
       }),
     ).toMatchObject({ kind: "ready", phase: "reconstructing" });
 
@@ -152,9 +157,31 @@ describe("vote contracts", () => {
           threshold: READINESS_THRESHOLD,
           voterIds: ["participant-a"],
         },
-        transition: { claimed: true, jobId: "deploy-job" },
+        transition: {
+          claimed: true,
+          jobId: "deploy-job",
+          sourceSnapshotVersion: 7,
+        },
       }).success,
     ).toBe(false);
+  });
+
+  it("requires the server-owned source snapshot version in a transition claim", () => {
+    expect(
+      TransitionClaimSchema.safeParse({ claimed: true, jobId: "job-a" })
+        .success,
+    ).toBe(false);
+    expect(
+      TransitionClaimSchema.parse({
+        claimed: false,
+        jobId: "job-a",
+        sourceSnapshotVersion: 7,
+      }),
+    ).toEqual({
+      claimed: false,
+      jobId: "job-a",
+      sourceSnapshotVersion: 7,
+    });
   });
 
   it.each([
@@ -168,7 +195,11 @@ describe("vote contracts", () => {
         threshold: READINESS_THRESHOLD,
         voterIds: ["participant-a"],
       },
-      transition: { claimed: true, jobId: "job-a" },
+      transition: {
+        claimed: true,
+        jobId: "job-a",
+        sourceSnapshotVersion: 7,
+      },
     },
     {
       phase: "reconstructing",
@@ -180,7 +211,11 @@ describe("vote contracts", () => {
         threshold: READINESS_THRESHOLD,
         voterIds: [],
       },
-      transition: { claimed: false, jobId: "job-a" },
+      transition: {
+        claimed: false,
+        jobId: "job-a",
+        sourceSnapshotVersion: 7,
+      },
     },
   ])("rejects inconsistent ready response authority: %o", (response) => {
     expect(

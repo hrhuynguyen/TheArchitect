@@ -144,7 +144,11 @@ export function createVoteService({
     roomId: string,
     sourceRevision: number,
     kind: "ready",
-  ): Promise<{ claimed: boolean; jobId: string }> => {
+  ): Promise<{
+    claimed: boolean;
+    jobId: string;
+    sourceSnapshotVersion: number;
+  }> => {
     if (!Number.isSafeInteger(sourceRevision) || sourceRevision < 0) {
       throw new Error("Invalid source revision");
     }
@@ -165,7 +169,11 @@ export function createVoteService({
         if (phase.count !== 1) throw new PhaseAlreadyTransitioned();
         return created;
       });
-      return { claimed: true, jobId: job.id };
+      return {
+        claimed: true,
+        jobId: job.id,
+        sourceSnapshotVersion: job.sourceRevision,
+      };
     } catch (error) {
       if (uniqueConstraintFailure(error)) {
         const existing = await database.transitionJob.findUnique({
@@ -173,13 +181,25 @@ export function createVoteService({
             roomId_sourceRevision_kind: { roomId, sourceRevision, kind },
           },
         });
-        if (existing) return { claimed: false, jobId: existing.id };
+        if (existing) {
+          return {
+            claimed: false,
+            jobId: existing.id,
+            sourceSnapshotVersion: existing.sourceRevision,
+          };
+        }
       }
       if (error instanceof PhaseAlreadyTransitioned) {
         const existing = await database.transitionJob.findFirst({
           where: { roomId, kind },
         });
-        if (existing) return { claimed: false, jobId: existing.id };
+        if (existing) {
+          return {
+            claimed: false,
+            jobId: existing.id,
+            sourceSnapshotVersion: existing.sourceRevision,
+          };
+        }
       }
       throw error;
     }
@@ -310,7 +330,11 @@ export function createVoteService({
               kind,
               phase: startingPhase,
               snapshot: current,
-              transition: { claimed: false, jobId: existing.id },
+              transition: {
+                claimed: false,
+                jobId: existing.id,
+                sourceSnapshotVersion: existing.sourceRevision,
+              },
             });
           }
         }

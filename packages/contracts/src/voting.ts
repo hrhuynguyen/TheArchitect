@@ -78,6 +78,7 @@ export const TransitionClaimSchema = z
   .object({
     claimed: z.boolean(),
     jobId: z.string().min(1),
+    sourceSnapshotVersion: z.number().int().nonnegative(),
   })
   .strict();
 export type TransitionClaim = z.infer<typeof TransitionClaimSchema>;

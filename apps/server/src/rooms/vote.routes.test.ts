@@ -43,7 +43,11 @@ function routeHarness(closed = false) {
           voterIds: [...voterIds],
           threshold: READINESS_THRESHOLD,
         }),
-        transition: { claimed: true, jobId: "job-a" },
+        transition: {
+          claimed: true,
+          jobId: "job-a",
+          sourceSnapshotVersion: 1,
+        },
       };
     },
     async removeVote(_roomId: string, verifiedParticipantId: string, kind: VoteKind) {
@@ -107,7 +111,11 @@ describe("authenticated vote routes", () => {
       kind: "ready",
       phase: "reconstructing",
       snapshot: { voterIds: [participantId] },
-      transition: { claimed: true, jobId: "job-a" },
+      transition: {
+        claimed: true,
+        jobId: "job-a",
+        sourceSnapshotVersion: 1,
+      },
     });
     expect(voterIds).toEqual(new Set([participantId]));
 

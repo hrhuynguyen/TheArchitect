@@ -66,6 +66,12 @@ databaseDescribe("Prisma readiness transition concurrency", () => {
 
       expect(new Set([first.jobId, second.jobId]).size).toBe(1);
       expect([first.claimed, second.claimed].sort()).toEqual([false, true]);
+      const durableJob = await database.transitionJob.findFirstOrThrow({
+        where: { roomId: room.id, sourceRevision: 7, kind: "ready" },
+        select: { sourceRevision: true },
+      });
+      expect(first.sourceSnapshotVersion).toBe(durableJob.sourceRevision);
+      expect(second.sourceSnapshotVersion).toBe(durableJob.sourceRevision);
       expect(
         await database.transitionJob.count({
           where: { roomId: room.id, sourceRevision: 7, kind: "ready" },

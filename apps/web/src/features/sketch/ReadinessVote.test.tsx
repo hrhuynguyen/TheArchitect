@@ -448,7 +448,11 @@ describe("ReadinessVote", () => {
         kind: "ready",
         phase: "reconstructing",
         snapshot: snapshot(["participant-a"], ["participant-a"]),
-        transition: { claimed: true, jobId: "job-a" },
+        transition: {
+          claimed: true,
+          jobId: "job-a",
+          sourceSnapshotVersion: 1,
+        },
       }),
     );
     vi.stubGlobal("fetch", fetch);

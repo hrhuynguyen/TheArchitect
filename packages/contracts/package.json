@@ -9,6 +9,7 @@
     "./collaboration": "./src/collaboration.ts",
     "./infrastructure": "./src/infrastructure.ts",
     "./requirements": "./src/requirements.ts",
+    "./reconstruction": "./src/reconstruction.ts",
     "./rooms": "./src/rooms.ts",
     "./voting": "./src/voting.ts"
   },
