@@ -21,7 +21,10 @@ type WhiteboardProps = {
   room: RoomSummary;
 };
 
-type CanvasState = "connecting" | "ready" | "error";
+type CanvasState =
+  | { status: "connecting" }
+  | { status: "ready" }
+  | { status: "error"; message: string };
 
 export function Whiteboard({ room }: WhiteboardProps) {
   const localParticipant = room.currentParticipantId
@@ -46,8 +49,11 @@ function ConnectedWhiteboard({
   localParticipant,
   room,
 }: WhiteboardProps & { localParticipant: ParticipantSummary }) {
-  const [canvasState, setCanvasState] = useState<CanvasState>("connecting");
-  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [canvasState, setCanvasState] = useState<CanvasState>({
+    status: "connecting",
+  });
+  const [transportError, setTransportError] = useState<string | null>(null);
+  const [drawingWarning, setDrawingWarning] = useState<string | null>(null);
   const [cursor, setCursor] = useState<AwarenessCursor | undefined>();
   const [doc, setDoc] = useState<import("yjs").Doc | null>(null);
   const [provider, setProvider] = useState<HocuspocusProvider | null>(null);
@@ -87,8 +93,9 @@ function ConnectedWhiteboard({
     let drawingStore: TLStore | null = null;
     let binding: ReturnType<typeof createTldrawBinding> | null = null;
 
-    setCanvasState("connecting");
-    setConnectionError(null);
+    setCanvasState({ status: "connecting" });
+    setTransportError(null);
+    setDrawingWarning(null);
     setDoc(null);
     setProvider(null);
     setStore(null);
@@ -98,8 +105,10 @@ function ConnectedWhiteboard({
     try {
       collaboration = createRoomCollab({ roomId: room.id });
     } catch {
-      setCanvasState("error");
-      setConnectionError("Shared canvas connection is unavailable.");
+      setCanvasState({
+        status: "error",
+        message: "Shared canvas connection is unavailable.",
+      });
       return;
     }
 
@@ -114,34 +123,40 @@ function ConnectedWhiteboard({
           doc: collaboration.doc,
           onError: () => {
             if (active) {
-              setConnectionError("Some shared drawing data could not be loaded.");
+              setDrawingWarning(
+                "Some shared drawing data could not be loaded.",
+              );
             }
           },
           store: drawingStore,
         });
         setStore(drawingStore);
-        setCanvasState("ready");
-        setConnectionError(null);
+        setCanvasState({ status: "ready" });
       } catch {
         binding?.destroy();
         binding = null;
         drawingStore?.dispose();
         drawingStore = null;
-        setCanvasState("error");
-        setConnectionError("Shared canvas data could not be opened.");
+        setCanvasState({
+          status: "error",
+          message: "Shared canvas data could not be opened.",
+        });
       }
     };
     const receiveSynced = ({ state }: { state: boolean }) => {
-      if (state) startDrawing();
+      if (state) {
+        setTransportError(null);
+        startDrawing();
+      }
     };
     const receiveStatus = ({ status }: { status: string }) => {
       if (!active) return;
       if (status === "disconnected") {
-        setConnectionError(
+        setTransportError(
           "Shared canvas connection is unavailable. Retrying…",
         );
       } else if (status === "connected") {
-        setConnectionError(null);
+        setTransportError(null);
       }
     };
 
@@ -167,13 +182,19 @@ function ConnectedWhiteboard({
     });
   };
 
-  if (canvasState === "error" || !doc) {
+  if (canvasState.status === "error") {
     return (
       <div className="whiteboard-state">
-        {canvasState === "error" ? (
-          <p role="alert">{connectionError}</p>
-        ) : connectionError ? (
-          <p role="alert">{connectionError}</p>
+        <p role="alert">{canvasState.message}</p>
+      </div>
+    );
+  }
+
+  if (!doc || canvasState.status !== "ready" || !store) {
+    return (
+      <div className="whiteboard-state">
+        {transportError ? (
+          <p role="alert">{transportError}</p>
         ) : (
           <p role="status">Connecting shared canvas…</p>
         )}
@@ -181,17 +202,9 @@ function ConnectedWhiteboard({
     );
   }
 
-  if (canvasState !== "ready" || !store) {
-    return (
-      <div className="whiteboard-state">
-        {connectionError ? (
-          <p role="alert">{connectionError}</p>
-        ) : (
-          <p role="status">Connecting shared canvas…</p>
-        )}
-      </div>
-    );
-  }
+  const readyError = [transportError, drawingWarning]
+    .filter((message): message is string => Boolean(message))
+    .join(" ");
 
   return (
     <div className="sketch-workspace">
@@ -223,7 +236,7 @@ function ConnectedWhiteboard({
           />
         </div>
       </section>
-      <RequirementsPanel connectionError={connectionError} doc={doc} />
+      <RequirementsPanel connectionError={readyError || null} doc={doc} />
     </div>
   );
 }

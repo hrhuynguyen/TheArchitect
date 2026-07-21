@@ -247,6 +247,62 @@ describe("Whiteboard", () => {
     doc.destroy();
   });
 
+  it("keeps a synchronous drawing-data warning visible with the usable canvas", async () => {
+    const boundary = providerBoundary();
+    const doc = new Y.Doc();
+    mocks.createRoomCollab.mockReturnValue({
+      destroy: mocks.collabDestroy,
+      doc,
+      provider: boundary.provider,
+    });
+    mocks.createTldrawBinding.mockImplementationOnce(
+      ({ onError }: { onError: () => void }) => {
+        onError();
+        return { destroy: mocks.bindingDestroy };
+      },
+    );
+    render(<Whiteboard room={room} />);
+
+    act(() => boundary.emit("synced", { state: true }));
+    expect(await screen.findByTestId("tldraw-editor")).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Some shared drawing data could not be loaded.",
+    );
+
+    act(() => boundary.emit("status", { status: "connected" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Some shared drawing data could not be loaded.",
+    );
+    doc.destroy();
+  });
+
+  it("keeps a fatal opening error nonempty after a connected event", () => {
+    const boundary = providerBoundary();
+    const doc = new Y.Doc();
+    mocks.createRoomCollab.mockReturnValue({
+      destroy: mocks.collabDestroy,
+      doc,
+      provider: boundary.provider,
+    });
+    mocks.createTldrawBinding.mockImplementationOnce(() => {
+      throw new Error("binding failed");
+    });
+    render(<Whiteboard room={room} />);
+
+    act(() => boundary.emit("synced", { state: true }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Shared canvas data could not be opened.",
+    );
+    expect(screen.queryByTestId("tldraw-editor")).not.toBeInTheDocument();
+
+    act(() => boundary.emit("status", { status: "connected" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Shared canvas data could not be opened.",
+    );
+    expect(screen.getByRole("alert")).not.toBeEmptyDOMElement();
+    doc.destroy();
+  });
+
   it("uses the exact current participant ID when profiles are identical", () => {
     const boundary = providerBoundary();
     const doc = new Y.Doc();
