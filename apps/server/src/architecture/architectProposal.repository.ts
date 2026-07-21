@@ -351,6 +351,13 @@ export function createArchitectProposalRepository({
     return ArchitectTurnListSchema.parse({ turns: rows.map(publicTurn) });
   };
 
+  const readTurn = async (roomId: string, turnId: string) => {
+    const row = await database.architectProposal.findFirst({
+      where: { id: turnId, roomId },
+    });
+    return row ? publicTurn(row) : null;
+  };
+
   const rejectProposal = async (input: RejectProposalInput) =>
     transaction(async (client) => {
       const row = await client.architectProposal.findFirst({
@@ -406,6 +413,7 @@ export function createArchitectProposalRepository({
     completeTurn,
     failTurn,
     interruptStaleThinking,
+    readTurn,
     listTurns,
     rejectProposal,
   });

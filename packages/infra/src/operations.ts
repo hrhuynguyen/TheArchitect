@@ -1,9 +1,13 @@
 import {
+  ArchitectOperationSchema,
   ArchitectureSchema,
+  DestructiveConfirmationSchema,
   GraphOperationBatchSchema,
+  type ArchitectOperation,
   type Architecture,
   type ArchitectureRelationship,
   type ArchitectureResource,
+  type DestructiveConfirmation,
   type Diagnostic,
   type GraphOperation,
 } from "@architect/contracts";
@@ -81,7 +85,13 @@ function relationshipById(
   return relationship;
 }
 
-function applyOne(architecture: Architecture, operation: GraphOperation): void {
+type OperationPolicy = "manual" | "architect";
+
+function applyOne(
+  architecture: Architecture,
+  operation: GraphOperation,
+  policy: OperationPolicy,
+): void {
   switch (operation.type) {
     case "add_resource": {
       const { resource } = operation;
@@ -93,13 +103,16 @@ function applyOne(architecture: Architecture, operation: GraphOperation): void {
         );
       }
       if (
-        resource.origin !== "explicit" ||
+        resource.origin !==
+          (policy === "manual" ? "explicit" : "inferred-minimal") ||
         resource.approvalStatus !== "not-required" ||
         !RESOURCE_CATALOG[resource.type].diagramSupported
       ) {
         fail(
           "OPERATION_RESOURCE_NOT_MANUAL",
-          `Resource ${resource.id} cannot be added as a manual catalog resource.`,
+          policy === "manual"
+            ? `Resource ${resource.id} cannot be added as a manual catalog resource.`
+            : `Resource ${resource.id} does not have trusted architect provenance.`,
           { resourceId: resource.id },
         );
       }
@@ -146,12 +159,15 @@ function applyOne(architecture: Architecture, operation: GraphOperation): void {
         );
       }
       if (
-        relationship.origin !== "explicit" ||
+        relationship.origin !==
+          (policy === "manual" ? "explicit" : "inferred-minimal") ||
         relationship.approvalStatus !== "not-required"
       ) {
         fail(
           "OPERATION_RELATIONSHIP_NOT_MANUAL",
-          `Relationship ${relationship.id} cannot be added manually.`,
+          policy === "manual"
+            ? `Relationship ${relationship.id} cannot be added manually.`
+            : `Relationship ${relationship.id} does not have trusted architect provenance.`,
           { relationshipId: relationship.id },
         );
       }
@@ -243,27 +259,45 @@ export function applyOperations(
   architectureInput: Architecture,
   operationsInput: GraphOperation[],
 ): OperationResult {
+  return applyGraphOperations(architectureInput, operationsInput, "manual");
+}
+
+function invalidOperationResult(
+  architecture: Architecture,
+  code = "OPERATION_INVALID",
+  message = "The graph operation batch is invalid.",
+): OperationResult {
+  return Object.freeze({
+    ok: false,
+    architecture,
+    diagnostics: Object.freeze([
+      Object.freeze({
+        level: "error" as const,
+        code,
+        message,
+        path: "operations",
+        suggestion: "Submit a strict, bounded graph operation batch.",
+      }),
+    ]),
+  });
+}
+
+function applyGraphOperations(
+  architectureInput: Architecture,
+  operationsInput: GraphOperation[],
+  policy: OperationPolicy,
+): OperationResult {
   const architecture = ArchitectureSchema.parse(architectureInput);
   const parsedOperations = GraphOperationBatchSchema.safeParse(operationsInput);
   if (!parsedOperations.success) {
-    return Object.freeze({
-      ok: false,
-      architecture,
-      diagnostics: Object.freeze([
-        Object.freeze({
-          level: "error" as const,
-          code: "OPERATION_INVALID",
-          message: "The graph operation batch is invalid.",
-          path: "operations",
-          suggestion: "Submit a strict, bounded graph operation batch.",
-        }),
-      ]),
-    });
+    return invalidOperationResult(architecture);
   }
 
   const draft = structuredClone(architecture);
   try {
-    for (const operation of parsedOperations.data) applyOne(draft, operation);
+    for (const operation of parsedOperations.data) {
+      applyOne(draft, operation, policy);
+    }
   } catch (error) {
     if (!(error instanceof OperationFailure)) throw error;
     return Object.freeze({
@@ -294,4 +328,117 @@ export function applyOperations(
     architecture: parsed.data,
     diagnostics: Object.freeze([]),
   });
+}
+
+function architectGraphOperations(
+  operations: ArchitectOperation[],
+  confirmation: DestructiveConfirmation,
+): GraphOperation[] {
+  return operations.map((operation): GraphOperation => {
+    switch (operation.type) {
+      case "add_resource":
+        return {
+          type: "add_resource",
+          resource: {
+            ...operation.resource,
+            origin: "inferred-minimal",
+            reason: operation.reason,
+            approvalStatus: "not-required",
+          },
+        };
+      case "update_resource":
+        return {
+          type: "update_resource",
+          resourceId: operation.resourceId,
+          changes: operation.changes,
+        };
+      case "remove_resource":
+        return {
+          type: "remove_resource",
+          resourceId: operation.resourceId,
+          confirmation,
+        };
+      case "add_relationship":
+        return {
+          type: "add_relationship",
+          relationship: {
+            ...operation.relationship,
+            origin: "inferred-minimal",
+            reason: operation.reason,
+            approvalStatus: "not-required",
+          },
+        };
+      case "remove_relationship":
+        return {
+          type: "remove_relationship",
+          relationshipId: operation.relationshipId,
+          confirmation,
+        };
+    }
+  });
+}
+
+function parseArchitectOperations(
+  architectureInput: Architecture,
+  operationsInput: ArchitectOperation[],
+) {
+  const architecture = ArchitectureSchema.parse(architectureInput);
+  const parsed = ArchitectOperationSchema.array().min(1).max(200).safeParse(
+    operationsInput,
+  );
+  return parsed.success
+    ? { ok: true as const, architecture, operations: parsed.data }
+    : { ok: false as const, result: invalidOperationResult(architecture) };
+}
+
+export function validateArchitectOperations(
+  architectureInput: Architecture,
+  operationsInput: ArchitectOperation[],
+): OperationResult {
+  const parsed = parseArchitectOperations(architectureInput, operationsInput);
+  if (!parsed.ok) return parsed.result;
+  return applyGraphOperations(
+    parsed.architecture,
+    architectGraphOperations(parsed.operations, {
+      confirmed: true,
+      rationale: "Server-only proposal validation; no graph mutation is published.",
+    }),
+    "architect",
+  );
+}
+
+export function applyArchitectOperations(
+  architectureInput: Architecture,
+  operationsInput: ArchitectOperation[],
+  destructiveConfirmation?: DestructiveConfirmation,
+): OperationResult {
+  const parsed = parseArchitectOperations(architectureInput, operationsInput);
+  if (!parsed.ok) return parsed.result;
+  const destructive = parsed.operations.some((operation) =>
+    operation.type === "remove_resource" ||
+    operation.type === "remove_relationship"
+  );
+  const confirmation = DestructiveConfirmationSchema.safeParse(
+    destructiveConfirmation,
+  );
+  if (destructive && !confirmation.success) {
+    return invalidOperationResult(
+      parsed.architecture,
+      "ARCHITECT_DESTRUCTIVE_CONFIRMATION_REQUIRED",
+      "Review and confirm the destructive architect operations before applying.",
+    );
+  }
+  return applyGraphOperations(
+    parsed.architecture,
+    architectGraphOperations(
+      parsed.operations,
+      confirmation.success
+        ? confirmation.data
+        : {
+            confirmed: true,
+            rationale: "No destructive architect operations are present.",
+          },
+    ),
+    "architect",
+  );
 }

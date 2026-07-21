@@ -97,22 +97,29 @@ const architectOperationBatchSchema = z
   .min(1)
   .max(200);
 
-export const architectProviderOutputSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("explanation"),
-      responseText: responseTextSchema,
-      operations: z.array(architectOperationSchema).max(0),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("proposal"),
-      responseText: responseTextSchema,
-      operations: architectOperationBatchSchema,
-    })
-    .strict(),
-]);
+export const architectProviderOutputSchema = z
+  .object({
+    kind: z.enum(["explanation", "proposal"]),
+    responseText: responseTextSchema,
+    operations: z.array(architectOperationSchema).max(200),
+  })
+  .strict()
+  .superRefine((output, context) => {
+    if (output.kind === "explanation" && output.operations.length !== 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["operations"],
+        message: "Explanations cannot propose graph operations.",
+      });
+    }
+    if (output.kind === "proposal" && output.operations.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["operations"],
+        message: "Proposals must contain at least one graph operation.",
+      });
+    }
+  });
 export const ArchitectProviderOutputSchema = architectProviderOutputSchema;
 export type ArchitectProviderOutput = z.infer<
   typeof architectProviderOutputSchema

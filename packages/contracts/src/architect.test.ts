@@ -54,6 +54,7 @@ describe("architect contracts", () => {
 
     expect(ArchitectProviderOutputSchema.parse(explanation)).toEqual(explanation);
     expect(ArchitectProviderOutputSchema.parse(proposal)).toEqual(proposal);
+    expect("shape" in ArchitectProviderOutputSchema).toBe(true);
     expect(ArchitectProviderOutputSchema.safeParse({
       ...explanation,
       operations: [addQueueOperation],

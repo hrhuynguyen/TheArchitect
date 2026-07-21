@@ -378,5 +378,10 @@ describe("architect proposal repository", () => {
     await expect(repository.listTurns("room-a")).resolves.toMatchObject({
       turns: [{ id: "turn-a", state: "rejected" }],
     });
+    await expect(repository.readTurn("room-a", "turn-a")).resolves.toMatchObject({
+      id: "turn-a",
+      state: "rejected",
+    });
+    await expect(repository.readTurn("room-b", "turn-a")).resolves.toBeNull();
   });
 });
