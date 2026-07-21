@@ -91,9 +91,11 @@ The callback receives a closed record containing only trace ID, task, provider, 
 
 Public `AiError` instances contain and enumerate only a stable class name, stable code, sanitized message, trace ID, and `fallbackEligible`. They do not retain a raw error, provider message, cause, request, response, headers, or credentials.
 
-SDK error classification is allowlisted by official SDK error types and status classes. Unknown values and arbitrary `Error` instances pass through unchanged and remain ineligible. Authentication, permission, malformed-request, schema/configuration, and other non-transient failures are sanitized and ineligible.
+Adapter-owned SDK call boundaries never rethrow unknown or raw SDK errors. SDK error classification is allowlisted by official SDK error types and status classes. Recognized timeout and transient types map to eligible stable errors. Recognized non-transient types and unknown SDK throws map to a stable ineligible `AiProviderError` without retaining the raw message or cause. Authentication, permission, malformed-request, schema/configuration, and other non-transient failures are sanitized and ineligible.
 
-Every provider request has a positive finite timeout, a small finite SDK `maxRetries`, and a small finite output-repair count. Invalid structured output uses an iterative loop, never recursion. Refusal and non-output provider failures do not enter repair. Defaults and accepted maxima make the total provider attempt ceiling explicit: `(initial output attempt + repair attempts) × (initial SDK attempt + SDK retries)`. The configuration parser rejects values outside those bounds.
+The failover wrapper is a separate application boundary. If an injected application provider throws an arbitrary non-`AiError`, failover preserves that application error as ineligible and does not call fallback. Its terminal recorder still receives only a stable generic error code, never the thrown value or its message.
+
+Every provider request has a positive finite timeout, a small finite SDK `maxRetries`, and a small finite output-repair count. Invalid structured output uses an iterative loop, never recursion. Intermediate output/Zod failures stay internal and are not fallback-eligible; only the final exhausted `AiOutputError` is eligible. Refusal and non-output provider failures do not enter repair. Defaults and accepted maxima make the total provider attempt ceiling explicit: `(initial output attempt + repair attempts) × (initial SDK attempt + SDK retries)`. The configuration parser rejects values outside those bounds.
 
 ## Prompt and data flow
 
@@ -130,6 +132,7 @@ Tests use injected SDK-shaped clients and never call live providers. They cover:
 
 - OpenAI image input, `responses.parse`, `text.format`, configured model, safety identifier, timeout, retries, strict schema, and successful parse;
 - OpenAI and Anthropic refusal, timeout, transient, non-transient, missing output, invalid schema, and bounded repair behavior;
+- adapter sanitization of unknown SDK throws versus failover preservation of injected application-provider errors, with only a generic stable recorder code;
 - Anthropic structured output, configured model only, image input, timeout, retries, and strict schema;
 - reconstruction properties with dynamic keys, duplicate and prototype-sensitive key rejection, the 100-entry boundary, 101-entry rejection, and order-independent deterministic normalization;
 - generic architect fixture input validation before rendering and provider calls;
