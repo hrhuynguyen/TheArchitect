@@ -5,8 +5,8 @@ import {
   diagnosticSchema,
   infrastructureIntentSchema,
   stageDecisionSchema,
-} from "./infrastructure.js";
-import { RequirementsProfileSchema } from "./requirements.js";
+} from "@architect/contracts/infrastructure";
+import { RequirementsProfileSchema } from "@architect/contracts/requirements";
 
 export const PNG_DATA_URL_PREFIX = "data:image/png;base64," as const;
 export const MAX_PNG_BASE64_CHARS = 6_990_508 as const;
