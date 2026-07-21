@@ -26,6 +26,7 @@ enum TransitionKind {
 enum TransitionState {
   claimed
   running
+  publishing
   succeeded
   failed
 }
@@ -59,7 +60,7 @@ model Room {
   snapshots          YjsSnapshot[]
   revisions          ArchitectureRevision[]
   history            HistoryEvent[]
-  aiRuns              AiRun[]
+  aiRuns             AiRun[]
   architectProposals ArchitectProposal[]
   transitions        TransitionJob[]
   deployJobs         DeployJob[]
@@ -90,19 +91,20 @@ model YjsSnapshot {
 }
 
 model ArchitectureRevision {
-  id           String      @id @default(uuid())
-  roomId       String
-  version      Int
-  architecture Json
-  layout       Json
-  requirements Json
-  stage        String
-  authorType   String
-  authorId     String?
-  rationale    String
-  createdAt    DateTime    @default(now())
-  room         Room        @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  deployJobs   DeployJob[]
+  id            String         @id @default(uuid())
+  roomId        String
+  version       Int
+  architecture  Json
+  layout        Json
+  requirements  Json
+  stage         String
+  authorType    String
+  authorId      String?
+  rationale     String
+  createdAt     DateTime       @default(now())
+  room          Room           @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  deployJobs    DeployJob[]
+  transitionJob TransitionJob? @relation("TransitionJobArchitectureRevision")
 
   @@unique([roomId, version])
 }
@@ -140,33 +142,48 @@ model AiRun {
 }
 
 model ArchitectProposal {
-  id             String   @id @default(uuid())
+  id             String    @id @default(uuid())
   roomId         String
   baseRevisionId String
   operations     Json
   responseText   String
-  state          String   @default("proposal_ready")
-  traceId        String   @unique
-  createdAt      DateTime @default(now())
+  state          String    @default("proposal_ready")
+  traceId        String    @unique
+  createdAt      DateTime  @default(now())
   reviewedAt     DateTime?
-  room           Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  room           Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
 
   @@index([roomId, createdAt])
 }
 
 model TransitionJob {
-  id             String          @id @default(uuid())
-  roomId         String
-  sourceRevision Int
-  kind           TransitionKind
-  state          TransitionState @default(claimed)
-  traceId        String          @unique
-  errorCode      String?
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
-  room           Room            @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  id                     String                @id @default(uuid())
+  roomId                 String
+  sourceRevision         Int
+  kind                   TransitionKind
+  state                  TransitionState       @default(claimed)
+  traceId                String                @unique
+  errorCode              String?
+  attempt                Int                   @default(0)
+  leaseOwner             String?
+  leaseToken             String?
+  leaseExpiresAt         DateTime?
+  attemptParticipantId   String?
+  attemptInputDigest     String?
+  activeAiTraceId        String?
+  architectureRevisionId String?               @unique
+  result                 Json?
+  diagnostics            Json?
+  cleanupCompletedAt     DateTime?
+  phasePublishedAt       DateTime?
+  finishedAt             DateTime?
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+  room                   Room                  @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  architectureRevision   ArchitectureRevision? @relation("TransitionJobArchitectureRevision", fields: [architectureRevisionId], references: [id], onDelete: SetNull)
 
   @@unique([roomId, sourceRevision, kind])
+  @@index([state, leaseExpiresAt])
 }
 
 model DeployJob {
