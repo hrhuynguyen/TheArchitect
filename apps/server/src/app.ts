@@ -17,12 +17,21 @@ import {
 } from "./rooms/vote.routes.js";
 import type { VoteService } from "./rooms/vote.service.js";
 import type { ActiveDocumentRegistry } from "./collab/active-document.registry.js";
+import {
+  registerReconstructionRoutes,
+  type ReconstructionRouteConfig,
+  type ReconstructionRouteDatabase,
+} from "./reconstruction/reconstruction.routes.js";
+import type { ReconstructionService } from "./reconstruction/reconstruction.service.js";
 
 type BuildAppOptions = {
   databaseHealth?: typeof databaseHealth;
   logger?: FastifyServerOptions["logger"];
   roomConfig?: RoomRouteConfig;
   roomService?: RoomService;
+  reconstructionConfig?: ReconstructionRouteConfig;
+  reconstructionDatabase?: ReconstructionRouteDatabase;
+  reconstructionService?: ReconstructionService;
   voteParticipantDatabase?: VoteParticipantDatabase;
   voteDocuments?: ActiveDocumentRegistry;
   voteService?: VoteService;
@@ -59,6 +68,28 @@ export function buildApp(options: BuildAppOptions = {}) {
   });
 
   registerRoomRoutes(app, { service: roomService, getConfig: runtimeConfig });
+  if (options.reconstructionService) {
+    const reconstructionConfig = () => {
+      if (options.reconstructionConfig) return options.reconstructionConfig;
+      const env = parseEnv(process.env);
+      return {
+        nodeEnv: env.NODE_ENV,
+        cookieSigningSecret: env.COOKIE_SIGNING_SECRET,
+        ownerTokenPepper: env.OWNER_TOKEN_PEPPER,
+        enableDebugRoutes: env.ENABLE_DEBUG_ROUTES,
+      };
+    };
+    registerReconstructionRoutes(app, {
+      database:
+        options.reconstructionDatabase ??
+        (prisma as unknown as ReconstructionRouteDatabase),
+      getConfig: reconstructionConfig,
+      service: options.reconstructionService,
+    });
+    app.addHook("onClose", async () => {
+      await options.reconstructionService?.destroy();
+    });
+  }
   if (options.voteService) {
     registerVoteRoutes(app, {
       database:

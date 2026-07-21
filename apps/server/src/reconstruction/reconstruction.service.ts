@@ -439,7 +439,7 @@ export function createReconstructionService({
   }>) => {
     const request = DebugReconstructionRequestSchema.parse(input.request);
     const boundary = recordedProvider(async () => undefined);
-    return analyzeReconstruction({
+    const analysis = await analyzeReconstruction({
       aiTraceId: `debug-${createHmac("sha256", safetySecret)
         .update(`${input.roomId}\0${input.principalId}\0${Date.now()}`)
         .digest("hex")
@@ -447,6 +447,10 @@ export function createReconstructionService({
       safetyIdentifier: safetyIdentifier(input.roomId, input.principalId),
       ...request,
     }, boundary);
+    return Object.freeze({
+      ...analysis,
+      semanticGraph: analysis.deploymentPlan.architecture,
+    });
   };
 
   return Object.freeze({

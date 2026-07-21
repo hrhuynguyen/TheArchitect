@@ -43,6 +43,16 @@ const serverEnvSchema = z.object({
     .regex(/^[A-Za-z][A-Za-z0-9-]+$/)
     .default("architect"),
   AWS_DEPLOY_ROLE_ARN: z.string().default(""),
+}).superRefine((env, context) => {
+  const hasAnthropicKey = env.ANTHROPIC_API_KEY.trim().length > 0;
+  const hasAnthropicModel = env.ANTHROPIC_MODEL.trim().length > 0;
+  if (hasAnthropicKey !== hasAnthropicModel) {
+    context.addIssue({
+      code: "custom",
+      path: ["ANTHROPIC_API_KEY"],
+      message: "ANTHROPIC_API_KEY and ANTHROPIC_MODEL must be configured together",
+    });
+  }
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

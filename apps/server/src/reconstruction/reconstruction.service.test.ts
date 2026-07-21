@@ -38,6 +38,7 @@ class RecordingProvider implements AiProvider {
     private readonly events: string[],
     private readonly output: InfrastructureIntent | Error = intent,
     private readonly wait?: Promise<void>,
+    private readonly inputs: ReconstructionInput[] = [],
   ) {}
 
   identity(_task: AiTask): ProviderIdentity {
@@ -45,6 +46,7 @@ class RecordingProvider implements AiProvider {
   }
 
   async reconstruct(input: ReconstructionInput) {
+    this.inputs.push(input);
     this.events.push("provider-start");
     await this.wait;
     this.events.push("provider-finish");
@@ -106,6 +108,7 @@ function setup(options: {
   initialState?: "claimed" | "running" | "publishing" | "succeeded" | "failed";
 } = {}) {
   const events: string[] = [];
+  const providerInputs: ReconstructionInput[] = [];
   const sourcePayload = snapshot();
   const lease = {
     jobId: "job-a",
@@ -235,7 +238,13 @@ function setup(options: {
     },
   };
   const createProvider = vi.fn((recorder: AiRunRecorder) =>
-    new RecordingProvider(recorder, events, options.output, options.providerWait));
+    new RecordingProvider(
+      recorder,
+      events,
+      options.output,
+      options.providerWait,
+      providerInputs,
+    ));
   const service = createReconstructionService({
     repository: repository as never,
     publisher: publisher as never,
@@ -251,7 +260,16 @@ function setup(options: {
     createProvider,
     safetySecret: "test-cookie-signing-secret",
   });
-  return { createProvider, events, job, lease, publisher, repository, service };
+  return {
+    createProvider,
+    events,
+    job,
+    lease,
+    providerInputs,
+    publisher,
+    repository,
+    service,
+  };
 }
 
 const request = {
@@ -279,6 +297,12 @@ describe("reconstruction service", () => {
       "success-commit",
       "phase-mirror",
     ]);
+    expect(test.providerInputs[0]?.safetyIdentifier).not.toContain(
+      "participant-a",
+    );
+    expect(test.providerInputs[0]?.safetyIdentifier).toMatch(
+      /^[A-Za-z0-9_-]{43}$/,
+    );
   });
 
   it.each([
@@ -510,5 +534,30 @@ describe("reconstruction service", () => {
       expect(test.createProvider).not.toHaveBeenCalled();
       expect(test.events).toEqual([]);
     }
+  });
+
+  it("runs debug through the same pipeline without repository, publisher, or job mutation", async () => {
+    const test = setup();
+    const before = structuredClone(test.job);
+    const claim = vi.spyOn(test.repository, "claimAttempt");
+    const commit = vi.spyOn(test.repository, "commitAnalysis");
+    const publish = vi.spyOn(test.publisher, "publishArchitecture");
+
+    await expect(test.service.debugAnalyze({
+      roomId: "room-a",
+      principalId: "participant-a",
+      request: {
+        imageDataUrl: IMAGE,
+        mimeType: "image/png",
+        requirements,
+      },
+    })).resolves.toMatchObject({
+      provider: { provider: "openai", model: "gpt-5.6" },
+      semanticGraph: { version: "architecture/v1" },
+    });
+    expect(claim).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+    expect(test.job).toEqual(before);
   });
 });

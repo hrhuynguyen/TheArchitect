@@ -95,4 +95,15 @@ describe("parseEnv", () => {
       }),
     ).toThrow("ENABLE_DEBUG_ROUTES");
   });
+
+  it("requires Anthropic key and model to be configured together", () => {
+    for (const partial of [
+      { ANTHROPIC_API_KEY: "configured-key", ANTHROPIC_MODEL: "" },
+      { ANTHROPIC_API_KEY: "", ANTHROPIC_MODEL: "configured-model" },
+    ]) {
+      expect(() => parseEnv({ ...validSecrets, ...partial })).toThrow(
+        "ANTHROPIC_API_KEY",
+      );
+    }
+  });
 });

@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { participantCookieName } from "./auth/cookies.js";
+import { signParticipant } from "./auth/participant.js";
 import { buildApp } from "./app";
+
+const reconstructionSecret =
+  "app-reconstruction-cookie-secret-at-least-32-characters";
 
 describe("server app", () => {
   it("enables a capturable Fastify logger only when configured", async () => {
@@ -87,5 +92,57 @@ describe("server app", () => {
     } finally {
       await app.close();
     }
+  });
+
+  it("registers reconstruction routes and closes their service", async () => {
+    const envelope = {
+      jobId: "job-a",
+      sourceSnapshotVersion: 7,
+      state: "running" as const,
+      result: null,
+      error: null,
+    };
+    const reconstructionService = {
+      currentJob: vi.fn().mockResolvedValue(envelope),
+      jobById: vi.fn().mockResolvedValue(envelope),
+      reconstruct: vi.fn(),
+      debugAnalyze: vi.fn(),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    const app = buildApp({
+      reconstructionConfig: {
+        nodeEnv: "test",
+        cookieSigningSecret: reconstructionSecret,
+        ownerTokenPepper:
+          "app-reconstruction-owner-pepper-at-least-32-characters",
+        enableDebugRoutes: false,
+      },
+      reconstructionDatabase: {
+        participant: {
+          async findFirst() { return { id: "participant-a" }; },
+        },
+        room: {
+          async findUnique() { return null; },
+        },
+      },
+      reconstructionService: reconstructionService as never,
+    });
+
+    const signed = signParticipant(
+      { roomId: "room-a", participantId: "participant-a" },
+      reconstructionSecret,
+    );
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/rooms/room-a/reconstruction",
+      headers: {
+        cookie: `${participantCookieName("room-a")}=${encodeURIComponent(signed)}`,
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(envelope);
+
+    await app.close();
+    expect(reconstructionService.destroy).toHaveBeenCalledOnce();
   });
 });
