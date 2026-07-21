@@ -542,22 +542,29 @@ function compileCore(
         }
       : undefined;
   const requestedAvailabilityZones = new Map<string, number>();
+  const recordRequestedAvailabilityZones = (
+    vpcId: string,
+    required: number,
+  ): void => {
+    requestedAvailabilityZones.set(
+      vpcId,
+      Math.max(required, requestedAvailabilityZones.get(vpcId) ?? 0),
+    );
+  };
   const permitsAvailabilityZones = (required: number): boolean => {
     if (!singleExplicitVpcCapacity) return true;
     if (required <= singleExplicitVpcCapacity.maximum) return true;
-    requestedAvailabilityZones.set(
+    recordRequestedAvailabilityZones(
       singleExplicitVpcCapacity.resource.id,
-      Math.max(
-        required,
-        requestedAvailabilityZones.get(singleExplicitVpcCapacity.resource.id) ?? 0,
-      ),
+      required,
     );
     return false;
   };
 
   if (
     resources.some((resource) => SECURITY_GROUP_TYPES.has(resource.type)) &&
-    !hasType("SecurityGroup")
+    !hasType("SecurityGroup") &&
+    initialVpcCandidates.length <= 1
   ) {
     addGeneratedResource({
       requestedId: "inferred-security-group",
@@ -575,6 +582,7 @@ function compileCore(
   const workloadNeedsSubnet = resources.some((resource) =>
     HOSTED_TYPES.has(resource.type),
   );
+  const deferNetworkSubnetInference = initialVpcCandidates.length > 1;
   if (workloadNeedsSubnet) {
     const existingSubnets = resourcesOfType("Subnet");
     const needsPublicSubnet =
@@ -594,7 +602,7 @@ function compileCore(
         resource.properties.subnetType === "private",
     );
 
-    if (needsPublicSubnet && !hasPublicSubnet) {
+    if (needsPublicSubnet && !hasPublicSubnet && !deferNetworkSubnetInference) {
       addGeneratedResource({
         requestedId: "inferred-subnet-public",
         type: "Subnet",
@@ -619,6 +627,7 @@ function compileCore(
     if (
       hasType("ELB") &&
       publicAvailabilityZoneCount < 2 &&
+      !deferNetworkSubnetInference &&
       permitsAvailabilityZones(2)
     ) {
       const allSubnets = resourcesOfType("Subnet");
@@ -645,7 +654,7 @@ function compileCore(
         zone: "public",
       });
     }
-    if (needsPrivateSubnet && !hasPrivateSubnet) {
+    if (needsPrivateSubnet && !hasPrivateSubnet && !deferNetworkSubnetInference) {
       addGeneratedResource({
         requestedId: "inferred-subnet-private",
         type: "Subnet",
@@ -671,13 +680,14 @@ function compileCore(
     (resource) => resource.origin === "explicit",
   );
   const primaryCompute = originalCompute[0];
+  const computeReplicaPrimaryIds = new Map<string, string>();
   if (primaryCompute && originalCompute.length < desiredComputeCount) {
     for (
       let index = originalCompute.length + 1;
       index <= desiredComputeCount;
       index += 1
     ) {
-      addGeneratedResource({
+      const replica = addGeneratedResource({
         requestedId: generatedId(["stage", primaryCompute.sourceId, "replica", String(index)]),
         type: "EC2",
         name: nameWithSuffix(primaryCompute.name, ` replica ${index}`),
@@ -687,6 +697,7 @@ function compileCore(
         approvalStatus: "pending",
         zone: primaryCompute.zone,
       });
+      computeReplicaPrimaryIds.set(replica.id, primaryCompute.id);
     }
   }
 
@@ -745,6 +756,7 @@ function compileCore(
     subnetAvailabilityZoneCount < 2;
   if (
     hasType("VPC") &&
+    initialVpcCandidates.length <= 1 &&
     (needsStagedPublicSubnet || needsStagedComputeSubnet || needsProductionSubnet)
   ) {
     if (permitsAvailabilityZones(2)) {
@@ -913,24 +925,407 @@ function compileCore(
 
   const subnetsById = new Map(subnets.map((subnet) => [subnet.id, subnet]));
   const vpcIds = new Set(vpcs.map((vpc) => vpc.id));
-  const subnetOwnerIds = new Map<string, Set<string>>();
+  const resourceOwnerIds = new Map<string, Set<string>>();
   const containedSubnetIds = new Map<string, Set<string>>();
   for (const relationship of relationships) {
     if (
       relationship.kind !== "contains" ||
       relationship.approvalStatus === "rejected" ||
-      !vpcIds.has(relationship.sourceId) ||
-      !subnetsById.has(relationship.targetId)
+      !vpcIds.has(relationship.sourceId)
     ) {
       continue;
     }
-    const owners = subnetOwnerIds.get(relationship.targetId) ?? new Set<string>();
+    const owners =
+      resourceOwnerIds.get(relationship.targetId) ?? new Set<string>();
     owners.add(relationship.sourceId);
-    subnetOwnerIds.set(relationship.targetId, owners);
+    resourceOwnerIds.set(relationship.targetId, owners);
+    if (!subnetsById.has(relationship.targetId)) continue;
     const contained =
       containedSubnetIds.get(relationship.sourceId) ?? new Set<string>();
     contained.add(relationship.targetId);
     containedSubnetIds.set(relationship.sourceId, contained);
+  }
+
+  const ownerIdsFor = (resourceIds: string[]): Set<string> => {
+    const ownerIds = new Set<string>();
+    for (const resourceId of resourceIds) {
+      for (const ownerId of resourceOwnerIds.get(resourceId) ?? []) {
+        ownerIds.add(ownerId);
+      }
+    }
+    return ownerIds;
+  };
+  const commonOwnerIdsFor = (resourceIds: string[]): Set<string> => {
+    let commonOwnerIds: Set<string> | undefined;
+    for (const resourceId of resourceIds) {
+      const owners = resourceOwnerIds.get(resourceId);
+      if (!owners || owners.size === 0) continue;
+      commonOwnerIds = commonOwnerIds
+        ? new Set(
+            [...commonOwnerIds].filter((ownerId) => owners.has(ownerId)),
+          )
+        : new Set(owners);
+    }
+    return commonOwnerIds ?? new Set<string>();
+  };
+  const intersectOwnerIds = (
+    candidates: Set<string>,
+    evidence: Set<string>,
+  ): Set<string> =>
+    new Set([...candidates].filter((candidate) => evidence.has(candidate)));
+  const rawPlacementSubnetsFor = (hosted: WorkingResource): WorkingResource[] => {
+    const preferred = hosted.zone === "public" ? publicSubnets : privateSubnets;
+    return preferred.length > 0 ? preferred : subnets;
+  };
+  const ensureOwnerScopedElbSubnets = (ownerId: string): void => {
+    const owner = vpcs.find((vpc) => vpc.id === ownerId);
+    if (!owner) return;
+    const explicitMaximum =
+      owner.origin === "explicit" &&
+      typeof owner.properties.maxAvailabilityZones === "number"
+        ? owner.properties.maxAvailabilityZones
+        : undefined;
+
+    while (true) {
+      const ownerSubnets = subnets.filter(
+        (subnet) => resourceOwnerIds.get(subnet.id)?.has(ownerId) ?? false,
+      );
+      const ownerPublicSubnets = ownerSubnets.filter(
+        (subnet) =>
+          subnet.zone === "public" || subnet.properties.subnetType === "public",
+      );
+      const publicAvailabilityZones = new Set(
+        ownerPublicSubnets.map(semanticAvailabilityZone),
+      );
+      if (publicAvailabilityZones.size >= 2) return;
+
+      const ownerAvailabilityZones = new Set(
+        ownerSubnets.map(semanticAvailabilityZone),
+      );
+      const reusableAvailabilityZoneExists = [...ownerAvailabilityZones].some(
+        (availabilityZone) => !publicAvailabilityZones.has(availabilityZone),
+      );
+      if (
+        !reusableAvailabilityZoneExists &&
+        explicitMaximum !== undefined &&
+        ownerAvailabilityZones.size >= explicitMaximum
+      ) {
+        return;
+      }
+
+      const availabilityZone = selectAdditionalSemanticAvailabilityZone(
+        ownerSubnets,
+        ownerPublicSubnets,
+      );
+      const subnet = addGeneratedResource({
+        requestedId: generatedId([
+          "inferred",
+          "subnet",
+          "public",
+          ownerId,
+          availabilityZone,
+        ]),
+        type: "Subnet",
+        name: nameWithSuffix(owner.name, " public subnet"),
+        properties: {
+          availabilityZone,
+          subnetType: "public",
+        },
+        origin: "inferred-minimal",
+        reason: `${owner.name} needs public subnet coverage in another availability zone for its load balancer.`,
+        confidence: 1,
+        approvalStatus: "not-required",
+        zone: "public",
+      });
+      subnets.push(subnet);
+      subnets.sort((left, right) => compareText(left.id, right.id));
+      publicSubnets.push(subnet);
+      publicSubnets.sort((left, right) => compareText(left.id, right.id));
+      subnetsById.set(subnet.id, subnet);
+      resourceOwnerIds.set(subnet.id, new Set([ownerId]));
+      const contained = containedSubnetIds.get(ownerId) ?? new Set<string>();
+      contained.add(subnet.id);
+      containedSubnetIds.set(ownerId, contained);
+      addRelationship({
+        source: owner,
+        target: subnet,
+        kind: "contains",
+        reason: `${subnet.name} is scoped to the resolved load-balancer VPC.`,
+      });
+    }
+  };
+  const ensureOwnerScopedWorkloadSubnet = (
+    hosted: WorkingResource,
+    ownerId: string,
+  ): void => {
+    const owner = vpcs.find((vpc) => vpc.id === ownerId);
+    if (!owner) return;
+    const publicPlacement = hosted.zone === "public";
+    const ownerSubnets = subnets.filter(
+      (subnet) => resourceOwnerIds.get(subnet.id)?.has(ownerId) ?? false,
+    );
+    const compatibleSubnets = ownerSubnets.filter((subnet) =>
+      publicPlacement
+        ? subnet.zone === "public" || subnet.properties.subnetType === "public"
+        : subnet.zone !== "public" && subnet.properties.subnetType !== "public",
+    );
+    if (compatibleSubnets.length > 0) return;
+
+    const subnetType = publicPlacement ? "public" : "private";
+    const availabilityZone = selectAdditionalSemanticAvailabilityZone(
+      ownerSubnets,
+      [],
+    );
+    const subnet = addGeneratedResource({
+      requestedId: generatedId([
+        "inferred",
+        "subnet",
+        subnetType,
+        ownerId,
+        availabilityZone,
+      ]),
+      type: "Subnet",
+      name: nameWithSuffix(owner.name, ` ${subnetType} subnet`),
+      properties: { availabilityZone, subnetType },
+      origin: "inferred-minimal",
+      reason: `${hosted.name} needs a compatible subnet inside ${owner.name}.`,
+      confidence: 1,
+      approvalStatus: "not-required",
+      zone: subnetType,
+    });
+    subnets.push(subnet);
+    subnets.sort((left, right) => compareText(left.id, right.id));
+    (publicPlacement ? publicSubnets : privateSubnets).push(subnet);
+    publicSubnets.sort((left, right) => compareText(left.id, right.id));
+    privateSubnets.sort((left, right) => compareText(left.id, right.id));
+    subnetsById.set(subnet.id, subnet);
+    resourceOwnerIds.set(subnet.id, new Set([ownerId]));
+    const contained = containedSubnetIds.get(ownerId) ?? new Set<string>();
+    contained.add(subnet.id);
+    containedSubnetIds.set(ownerId, contained);
+    addRelationship({
+      source: owner,
+      target: subnet,
+      kind: "contains",
+      reason: `${subnet.name} is scoped to the resolved workload VPC.`,
+    });
+  };
+  const ensureOwnerScopedComputeStageSubnet = (
+    hosted: WorkingResource,
+    ownerId: string,
+  ): void => {
+    if (
+      hosted.type !== "EC2" ||
+      hosted.id !== primaryCompute?.id ||
+      desiredComputeCount <= 1
+    ) {
+      return;
+    }
+    const owner = vpcs.find((vpc) => vpc.id === ownerId);
+    if (!owner) return;
+    const publicPlacement = hosted.zone === "public";
+    const ownerSubnets = subnets.filter(
+      (subnet) => resourceOwnerIds.get(subnet.id)?.has(ownerId) ?? false,
+    );
+    const compatibleSubnets = ownerSubnets.filter((subnet) =>
+      publicPlacement
+        ? subnet.zone === "public" || subnet.properties.subnetType === "public"
+        : subnet.zone !== "public" && subnet.properties.subnetType !== "public",
+    );
+    const compatibleAvailabilityZones = new Set(
+      compatibleSubnets.map(semanticAvailabilityZone),
+    );
+    if (compatibleAvailabilityZones.size >= 2) return;
+
+    recordRequestedAvailabilityZones(ownerId, 2);
+    const ownerAvailabilityZones = new Set(
+      ownerSubnets.map(semanticAvailabilityZone),
+    );
+    const reusableAvailabilityZoneExists = [...ownerAvailabilityZones].some(
+      (availabilityZone) =>
+        !compatibleAvailabilityZones.has(availabilityZone),
+    );
+    const explicitMaximum =
+      owner.origin === "explicit" &&
+      typeof owner.properties.maxAvailabilityZones === "number"
+        ? owner.properties.maxAvailabilityZones
+        : undefined;
+    if (
+      !reusableAvailabilityZoneExists &&
+      explicitMaximum !== undefined &&
+      ownerAvailabilityZones.size >= explicitMaximum
+    ) {
+      return;
+    }
+
+    const subnetType = publicPlacement ? "public" : "private";
+    const availabilityZone = selectAdditionalSemanticAvailabilityZone(
+      ownerSubnets,
+      compatibleSubnets,
+    );
+    const subnet = addGeneratedResource({
+      requestedId: generatedId([
+        "stage",
+        "subnet",
+        "secondary",
+        ownerId,
+      ]),
+      type: "Subnet",
+      name: nameWithSuffix(owner.name, " secondary subnet"),
+      properties: { availabilityZone, subnetType },
+      origin: "stage-upgrade",
+      reason: `The ${stageRecommendation.stage} stage proposes capacity in a second availability zone inside ${owner.name}.`,
+      approvalStatus: "pending",
+      zone: subnetType,
+    });
+    subnets.push(subnet);
+    subnets.sort((left, right) => compareText(left.id, right.id));
+    (publicPlacement ? publicSubnets : privateSubnets).push(subnet);
+    publicSubnets.sort((left, right) => compareText(left.id, right.id));
+    privateSubnets.sort((left, right) => compareText(left.id, right.id));
+    subnetsById.set(subnet.id, subnet);
+    resourceOwnerIds.set(subnet.id, new Set([ownerId]));
+    const contained = containedSubnetIds.get(ownerId) ?? new Set<string>();
+    contained.add(subnet.id);
+    containedSubnetIds.set(ownerId, contained);
+    addRelationship({
+      source: owner,
+      target: subnet,
+      kind: "contains",
+      reason: `${subnet.name} is scoped to the resolved compute VPC.`,
+    });
+  };
+  const ensureOwnerScopedSecurityGroup = (ownerId: string): void => {
+    if (
+      securityGroups.some(
+        (securityGroup) =>
+          resourceOwnerIds.get(securityGroup.id)?.has(ownerId) ?? false,
+      )
+    ) {
+      return;
+    }
+    const owner = vpcs.find((vpc) => vpc.id === ownerId);
+    if (!owner) return;
+    const securityGroup = addGeneratedResource({
+      requestedId: generatedId([
+        "inferred",
+        "security-group",
+        ownerId,
+      ]),
+      type: "SecurityGroup",
+      name: nameWithSuffix(owner.name, " security group"),
+      properties: { allowAllOutbound: true },
+      origin: "inferred-minimal",
+      reason: `${owner.name} needs a security boundary for its network-attached workloads.`,
+      confidence: 1,
+      approvalStatus: "not-required",
+      zone: "private",
+    });
+    securityGroups.push(securityGroup);
+    securityGroups.sort((left, right) => compareText(left.id, right.id));
+    resourceOwnerIds.set(securityGroup.id, new Set([ownerId]));
+    addRelationship({
+      source: owner,
+      target: securityGroup,
+      kind: "contains",
+      reason: `${securityGroup.name} is scoped to the resolved workload VPC.`,
+    });
+  };
+  const hostedVpcOwnerIds = new Map<string, string>();
+  const blockedHostedVpcIds = new Set<string>();
+  for (const hosted of resources
+    .filter((resource) => HOSTED_TYPES.has(resource.type))
+    .sort(
+      (left, right) =>
+        Number(computeReplicaPrimaryIds.has(left.id)) -
+          Number(computeReplicaPrimaryIds.has(right.id)) ||
+        compareText(left.id, right.id),
+    )) {
+    const explicitHosting = relationships.filter(
+      (relationship) =>
+        relationship.origin === "explicit" &&
+        relationship.kind === "hosts" &&
+        relationship.targetId === hosted.id &&
+        subnetsById.has(relationship.sourceId),
+    );
+    const explicitProtection = relationships.filter(
+      (relationship) =>
+        relationship.origin === "explicit" &&
+        relationship.kind === "protects" &&
+        relationship.targetId === hosted.id &&
+        securityGroups.some(
+          (securityGroup) => securityGroup.id === relationship.sourceId,
+        ),
+    );
+    const ownerEvidence: Set<string>[] = [];
+    const addOwnerEvidence = (ownerIds: Set<string>): void => {
+      if (ownerIds.size > 0) ownerEvidence.push(ownerIds);
+    };
+    addOwnerEvidence(resourceOwnerIds.get(hosted.id) ?? new Set<string>());
+    const replicaPrimaryOwnerId = hostedVpcOwnerIds.get(
+      computeReplicaPrimaryIds.get(hosted.id) ?? "",
+    );
+    if (replicaPrimaryOwnerId) {
+      addOwnerEvidence(new Set([replicaPrimaryOwnerId]));
+    }
+    addOwnerEvidence(
+      ownerIdsFor(explicitHosting.map((relationship) => relationship.sourceId)),
+    );
+    addOwnerEvidence(
+      ownerIdsFor(
+        explicitProtection.map((relationship) => relationship.sourceId),
+      ),
+    );
+    if (
+      explicitProtection.length === 0 &&
+      securityGroups.length === 1 &&
+      securityGroups[0]?.origin === "explicit"
+    ) {
+      addOwnerEvidence(ownerIdsFor([securityGroups[0]!.id]));
+    }
+    if (explicitHosting.length === 0) {
+      addOwnerEvidence(
+        commonOwnerIdsFor(
+          rawPlacementSubnetsFor(hosted).map((subnet) => subnet.id),
+        ),
+      );
+    }
+
+    let ownerCandidates = new Set(vpcIds);
+    for (const evidence of ownerEvidence) {
+      ownerCandidates = intersectOwnerIds(ownerCandidates, evidence);
+    }
+    if (ownerCandidates.size === 1) {
+      const [ownerId] = ownerCandidates;
+      if (ownerId) {
+        hostedVpcOwnerIds.set(hosted.id, ownerId);
+        if (hosted.type === "ELB" && explicitHosting.length === 0) {
+          recordRequestedAvailabilityZones(ownerId, 2);
+          ensureOwnerScopedElbSubnets(ownerId);
+        } else if (explicitHosting.length === 0) {
+          ensureOwnerScopedWorkloadSubnet(hosted, ownerId);
+        }
+        ensureOwnerScopedComputeStageSubnet(hosted, ownerId);
+        if (explicitProtection.length === 0) {
+          ensureOwnerScopedSecurityGroup(ownerId);
+        }
+      }
+      continue;
+    }
+    if (vpcs.length === 0) continue;
+
+    blockedHostedVpcIds.add(hosted.id);
+    diagnostics.push({
+      level: "error",
+      code: "AMBIGUOUS_VPC_ATTACHMENT",
+      message:
+        ownerCandidates.size === 0
+          ? `${hosted.name} has conflicting subnet and security-group VPC topology.`
+          : `${hosted.name} cannot be placed because multiple VPC candidates remain.`,
+      resourceId: hosted.id,
+      suggestion:
+        "Align explicit contains, hosts, and protects relationships to one VPC.",
+    });
   }
 
   const explicitVpcCapacities = new Map<
@@ -979,7 +1374,7 @@ function compileCore(
   }
 
   const isPlacementAllowedByVpcCap = (subnet: WorkingResource): boolean => {
-    const owners = subnetOwnerIds.get(subnet.id);
+    const owners = resourceOwnerIds.get(subnet.id);
     if (!owners || owners.size === 0) return true;
     return [...owners].every((ownerId) => {
       if (!explicitVpcCapacities.has(ownerId)) return true;
@@ -1001,20 +1396,56 @@ function compileCore(
         relationship.targetId === hosted.id &&
         subnets.some((candidate) => candidate.id === relationship.sourceId),
     );
-    if (!hasExplicitHosting) {
+    const resolvedVpcOwnerId = hostedVpcOwnerIds.get(hosted.id);
+    const isInResolvedVpc = (resource: WorkingResource): boolean =>
+      !resolvedVpcOwnerId ||
+      (resourceOwnerIds.get(resource.id)?.has(resolvedVpcOwnerId) ?? false);
+    if (!hasExplicitHosting && !blockedHostedVpcIds.has(hosted.id)) {
       const preferred =
         hosted.zone === "public"
           ? placementPublicSubnets
           : placementPrivateSubnets;
-      const candidates = preferred.length > 0 ? preferred : placementSubnets;
-      const placementKey = hosted.zone === "public" ? "public" : "private";
+      const comparePlacementSubnet = (
+        left: WorkingResource,
+        right: WorkingResource,
+      ): number =>
+        (hosted.origin === "stage-upgrade" ? -1 : 1) *
+          (Number(left.origin === "stage-upgrade") -
+            Number(right.origin === "stage-upgrade")) ||
+        compareText(left.id, right.id);
+      const preferredInVpc = preferred
+        .filter(isInResolvedVpc)
+        .sort(comparePlacementSubnet);
+      const fallbackInVpc = placementSubnets
+        .filter(isInResolvedVpc)
+        .sort(comparePlacementSubnet);
+      const compatibleCandidates =
+        preferredInVpc.length > 0 ? preferredInVpc : fallbackInVpc;
+      const candidates =
+        hosted.origin === "stage-upgrade"
+          ? compatibleCandidates
+          : compatibleCandidates.filter(
+              (candidate) => candidate.origin !== "stage-upgrade",
+            );
+      const placementKey = `${resolvedVpcOwnerId ?? "unscoped"}:${
+        hosted.zone === "public" ? "public" : "private"
+      }:${hosted.origin === "stage-upgrade" ? "staged" : "durable"}`;
       const offset = placementOffsets.get(placementKey) ?? 0;
-      const selectedSubnets =
-        hosted.type === "ELB"
-          ? candidates
-          : candidates.length > 0
+      let selectedSubnets: WorkingResource[];
+      if (hosted.type === "ELB") {
+        const selectedAvailabilityZones = new Set<string>();
+        selectedSubnets = candidates.filter((candidate) => {
+          const availabilityZone = semanticAvailabilityZone(candidate);
+          if (selectedAvailabilityZones.has(availabilityZone)) return false;
+          selectedAvailabilityZones.add(availabilityZone);
+          return true;
+        });
+      } else {
+        selectedSubnets =
+          candidates.length > 0
             ? [candidates[offset % candidates.length]!]
             : [];
+      }
       if (hosted.type !== "ELB" && candidates.length > 0) {
         placementOffsets.set(placementKey, offset + 1);
       }
@@ -1037,7 +1468,9 @@ function compileCore(
         ),
     );
     if (hasExplicitProtection) continue;
-    if (securityGroups.length > 1) {
+    if (blockedHostedVpcIds.has(hosted.id)) continue;
+    const protectionCandidates = securityGroups.filter(isInResolvedVpc);
+    if (protectionCandidates.length > 1) {
       diagnostics.push({
         level: "error",
         code: "AMBIGUOUS_SECURITY_GROUP_ATTACHMENT",
@@ -1047,7 +1480,7 @@ function compileCore(
       });
       continue;
     }
-    const [securityGroup] = securityGroups;
+    const [securityGroup] = protectionCandidates;
     if (securityGroup) {
       addRelationship({
         source: securityGroup,
