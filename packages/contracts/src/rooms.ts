@@ -37,6 +37,7 @@ export const RoomSummarySchema = z.object({
   mode: RoomModeSchema,
   phase: RoomPhaseSchema,
   isOwner: z.boolean(),
+  currentParticipantId: z.string().min(1).nullable(),
   participants: z.array(ParticipantSummarySchema),
 });
 export const RoomSummary = RoomSummarySchema;

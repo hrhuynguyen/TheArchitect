@@ -68,6 +68,7 @@ const room: RoomSummary = {
   mode: "shared",
   phase: "sketch",
   isOwner: true,
+  currentParticipantId: "participant-ada",
   participants: [{ id: "participant-ada", name: "Ada", color: "#10A37F" }],
 };
 
@@ -161,6 +162,43 @@ describe("Whiteboard", () => {
     doc.destroy();
   });
 
+  it("clears a queued cursor on pointer leave without a stale timer replay", () => {
+    vi.useFakeTimers();
+    const boundary = providerBoundary();
+    const doc = new Y.Doc();
+    mocks.createRoomCollab.mockReturnValue({
+      destroy: mocks.collabDestroy,
+      doc,
+      provider: boundary.provider,
+    });
+    render(<Whiteboard room={room} />);
+    act(() => boundary.emit("synced", { state: true }));
+
+    const editor = screen.getByTestId("tldraw-editor");
+    const canvas = editor.parentElement!;
+    Object.defineProperty(canvas, "getBoundingClientRect", {
+      value: () => ({ left: 40, top: 80 }),
+    });
+    act(() => {
+      fireEvent.pointerMove(editor, { clientX: 140, clientY: 230 });
+      fireEvent.pointerMove(editor, { clientX: 180, clientY: 270 });
+      fireEvent.pointerLeave(canvas);
+    });
+    expect(mocks.usePresence).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        profile: expect.not.objectContaining({ cursor: expect.anything() }),
+      }),
+    );
+
+    act(() => vi.advanceTimersByTime(50));
+    expect(mocks.usePresence).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        profile: expect.not.objectContaining({ cursor: expect.anything() }),
+      }),
+    );
+    doc.destroy();
+  });
+
   it("reports a disconnect safely after a successful sync", async () => {
     const boundary = providerBoundary();
     const doc = new Y.Doc();
@@ -181,11 +219,35 @@ describe("Whiteboard", () => {
     doc.destroy();
   });
 
-  it("identifies the current participant from the persisted guest profile", () => {
-    window.localStorage.setItem(
-      "architect.guest-profile.v1",
-      JSON.stringify({ name: "Grace", color: "#2563EB" }),
+  it("shows a pre-sync disconnect and clears it after reconnecting and syncing", async () => {
+    const boundary = providerBoundary();
+    const doc = new Y.Doc();
+    mocks.createRoomCollab.mockReturnValue({
+      destroy: mocks.collabDestroy,
+      doc,
+      provider: boundary.provider,
+    });
+    render(<Whiteboard room={room} />);
+
+    act(() => boundary.emit("status", { status: "disconnected" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Shared canvas connection is unavailable. Retrying…",
     );
+    expect(screen.queryByTestId("tldraw-editor")).not.toBeInTheDocument();
+
+    act(() => boundary.emit("status", { status: "connected" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Connecting shared canvas…",
+    );
+
+    act(() => boundary.emit("synced", { state: true }));
+    expect(await screen.findByTestId("tldraw-editor")).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    doc.destroy();
+  });
+
+  it("uses the exact current participant ID when profiles are identical", () => {
     const boundary = providerBoundary();
     const doc = new Y.Doc();
     mocks.createRoomCollab.mockReturnValue({
@@ -198,9 +260,10 @@ describe("Whiteboard", () => {
         room={{
           ...room,
           isOwner: false,
+          currentParticipantId: "participant-grace",
           participants: [
-            ...room.participants,
-            { id: "participant-grace", name: "Grace", color: "#2563EB" },
+            { id: "participant-ada", name: "Ada", color: "#10A37F" },
+            { id: "participant-grace", name: "Ada", color: "#10A37F" },
           ],
         }}
       />,
@@ -210,10 +273,26 @@ describe("Whiteboard", () => {
       expect.objectContaining({
         profile: expect.objectContaining({
           participantId: "participant-grace",
-          name: "Grace",
+          name: "Ada",
         }),
       }),
     );
     doc.destroy();
   });
+
+  it.each([
+    ["missing", null],
+    ["stale", "participant-missing"],
+  ])(
+    "keeps collaboration closed for a %s participant session",
+    (_label, currentParticipantId) => {
+      render(<Whiteboard room={{ ...room, currentParticipantId }} />);
+
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Your room session is unavailable. Join the room again to collaborate.",
+      );
+      expect(mocks.createRoomCollab).not.toHaveBeenCalled();
+      expect(mocks.usePresence).not.toHaveBeenCalled();
+    },
+  );
 });

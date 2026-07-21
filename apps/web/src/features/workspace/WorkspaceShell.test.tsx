@@ -13,6 +13,7 @@ const room = {
   mode: "shared" as const,
   phase: "architect" as const,
   isOwner: false,
+  currentParticipantId: "participant-grace",
   participants: [
     { id: "participant-ada", name: "Ada", color: "#10A37F" },
     { id: "participant-grace", name: "Grace", color: "#D97706" },

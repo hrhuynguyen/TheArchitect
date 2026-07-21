@@ -29,12 +29,17 @@ type RegisterRoomRoutesOptions = {
   getConfig(): RoomRouteConfig;
 };
 
-function roomSummary(room: RoomRecord, isOwner: boolean): RoomSummary {
+function roomSummary(
+  room: RoomRecord,
+  isOwner: boolean,
+  currentParticipantId: string | null,
+): RoomSummary {
   return {
     id: room.id,
     mode: room.mode,
     phase: room.phase,
     isOwner,
+    currentParticipantId,
     participants: room.participants,
   };
 }
@@ -60,6 +65,22 @@ function returningParticipantId(
   } catch {
     return undefined;
   }
+}
+
+function verifiedRoomParticipantId(
+  room: RoomRecord,
+  cookie: string | undefined,
+  signingSecret: string,
+): string | null {
+  const participantId = returningParticipantId(
+    cookie,
+    room.id,
+    signingSecret,
+  );
+  return participantId &&
+    room.participants.some((participant) => participant.id === participantId)
+    ? participantId
+    : null;
 }
 
 export function registerRoomRoutes(
@@ -99,7 +120,7 @@ export function registerRoomRoutes(
     ]);
 
     const response: CreateRoomResponse = {
-      ...roomSummary(created.room, true),
+      ...roomSummary(created.room, true, created.participantId),
       joinPath: `/room/${created.room.id}`,
     };
     return reply.code(201).send(response);
@@ -148,7 +169,11 @@ export function registerRoomRoutes(
           ),
         );
 
-        const response: JoinRoomResponse = roomSummary(joined.room, owner);
+        const response: JoinRoomResponse = roomSummary(
+          joined.room,
+          owner,
+          joined.participantId,
+        );
         return reply.send(response);
       } catch (error) {
         return publicError(reply, error);
@@ -166,7 +191,13 @@ export function registerRoomRoutes(
           room,
           cookies.get(ownerCookieName(room.id)),
         );
-        return reply.send(roomSummary(room, owner));
+        const config = options.getConfig();
+        const currentParticipantId = verifiedRoomParticipantId(
+          room,
+          cookies.get(participantCookieName(room.id)),
+          config.cookieSigningSecret,
+        );
+        return reply.send(roomSummary(room, owner, currentParticipantId));
       } catch (error) {
         return publicError(reply, error);
       }

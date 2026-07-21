@@ -17,6 +17,7 @@ const sharedRoom = {
   mode: "shared" as const,
   phase: "sketch" as const,
   isOwner: true,
+  currentParticipantId: "participant-ada",
   participants: [{ id: "participant-ada", name: "Ada", color: "#10A37F" }],
   joinPath: "/room/room-ada",
 };

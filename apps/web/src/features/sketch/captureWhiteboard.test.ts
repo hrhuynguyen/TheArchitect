@@ -63,4 +63,20 @@ describe("captureWhiteboard", () => {
       "Whiteboard export did not produce a PNG image.",
     );
   });
+
+  it.each([
+    ["an empty payload", "data:image/png;base64,"],
+    ["malformed base64", "data:image/png;base64,iVBORw0KGgo*"],
+    ["a truncated base64 group", "data:image/png;base64,iVBORw0KGgo"],
+    ["a different file signature", "data:image/png;base64,R0lGODlhAQABAIAAAAUEBA=="],
+  ])("rejects %s behind a PNG data URL", async (_label, imageDataUrl) => {
+    const { editor } = editorBoundary(
+      ["shape:one"] as TLShapeId[],
+      imageDataUrl,
+    );
+
+    await expect(captureWhiteboard(editor)).rejects.toThrow(
+      "Whiteboard export did not produce a PNG image.",
+    );
+  });
 });

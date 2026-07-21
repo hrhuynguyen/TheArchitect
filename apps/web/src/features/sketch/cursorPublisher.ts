@@ -2,7 +2,7 @@ import type { AwarenessCursor } from "@architect/contracts";
 
 type CreateBoundedCursorPublisherOptions = {
   intervalMs?: number;
-  onPublish: (cursor: AwarenessCursor) => void;
+  onPublish: (cursor: AwarenessCursor | undefined) => void;
 };
 
 function isMeaningfulMove(
@@ -44,6 +44,15 @@ export function createBoundedCursorPublisher({
   };
 
   return {
+    clear(): void {
+      if (destroyed) return;
+      pending = null;
+      lastPublished = null;
+      nextAllowedAt = 0;
+      if (timer) clearTimeout(timer);
+      timer = null;
+      onPublish(undefined);
+    },
     move(cursor: AwarenessCursor): void {
       if (
         destroyed ||

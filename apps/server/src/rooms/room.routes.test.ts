@@ -5,7 +5,9 @@ import {
 } from "@architect/contracts";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../app.js";
+import { participantCookieName } from "../auth/cookies.js";
 import { verifyOwnerToken } from "../auth/ownerToken.js";
+import { signParticipant } from "../auth/participant.js";
 import {
   createRoomService,
   type ParticipantRecord,
@@ -100,6 +102,7 @@ describe("room routes", () => {
         phase: "sketch",
         mode: "shared",
         isOwner: true,
+        currentParticipantId: expect.any(String),
         joinPath: "/room/room-1",
       });
       expect(body.participants).toEqual([
@@ -166,6 +169,8 @@ describe("room routes", () => {
       expect(response.statusCode).toBe(200);
       const body = JoinRoomResponseSchema.parse(response.json());
       expect(body.isOwner).toBe(false);
+      expect(body.currentParticipantId).toEqual(expect.any(String));
+      expect(body.currentParticipantId).toBe(body.participants[1]?.id);
       expect(body.participants).toEqual([
         expect.objectContaining({ name: "Ada" }),
         expect.objectContaining({ name: "Grace", color: "#abcdef" }),
@@ -357,6 +362,92 @@ describe("room routes", () => {
         },
       });
       expect(RoomSummarySchema.parse(impostor.json()).isOwner).toBe(false);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("returns only the exact participant identified by a verified room cookie", async () => {
+    const { app } = createTestApp();
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/rooms",
+        payload: { name: "Ada", color: "#10A37F", mode: "shared" },
+      });
+      const creator = CreateRoomResponseSchema.parse(created.json());
+      const creatorCookie = cookieWithPrefix(
+        created.cookies,
+        "architect_participant_",
+      );
+
+      const joined = await app.inject({
+        method: "POST",
+        url: "/api/rooms/room-1/join",
+        payload: { name: "Ada", color: "#10A37F" },
+      });
+      const joiner = JoinRoomResponseSchema.parse(joined.json());
+      const joinerCookie = cookieWithPrefix(
+        joined.cookies,
+        "architect_participant_",
+      );
+
+      expect(joiner.currentParticipantId).not.toBe(
+        creator.currentParticipantId,
+      );
+      expect(joiner.participants.filter(({ name }) => name === "Ada")).toHaveLength(
+        2,
+      );
+
+      const creatorView = await app.inject({
+        method: "GET",
+        url: "/api/rooms/room-1",
+        headers: { cookie: cookieHeader([creatorCookie]) },
+      });
+      const joinerView = await app.inject({
+        method: "GET",
+        url: "/api/rooms/room-1",
+        headers: { cookie: cookieHeader([joinerCookie]) },
+      });
+      expect(RoomSummarySchema.parse(creatorView.json()).currentParticipantId).toBe(
+        creator.currentParticipantId,
+      );
+      expect(RoomSummarySchema.parse(joinerView.json()).currentParticipantId).toBe(
+        joiner.currentParticipantId,
+      );
+
+      const staleCookie = signParticipant(
+        { roomId: "room-1", participantId: "missing-participant" },
+        roomConfig.cookieSigningSecret,
+      );
+      const anonymous = await app.inject({
+        method: "GET",
+        url: "/api/rooms/room-1",
+      });
+      const tampered = await app.inject({
+        method: "GET",
+        url: "/api/rooms/room-1",
+        headers: {
+          cookie: `${participantCookieName("room-1")}=${creatorCookie.value}x`,
+        },
+      });
+      const stale = await app.inject({
+        method: "GET",
+        url: "/api/rooms/room-1",
+        headers: {
+          cookie: `${participantCookieName("room-1")}=${staleCookie}`,
+        },
+      });
+
+      for (const response of [anonymous, tampered, stale]) {
+        expect(response.statusCode).toBe(200);
+        const room = RoomSummarySchema.parse(response.json());
+        expect(room.currentParticipantId).toBeNull();
+        expect(room.participants.some(({ id }) => id === creator.currentParticipantId)).toBe(
+          true,
+        );
+      }
     } finally {
       await app.close();
     }

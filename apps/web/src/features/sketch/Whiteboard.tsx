@@ -1,11 +1,14 @@
 "use client";
 
-import type { AwarenessCursor, RoomSummary } from "@architect/contracts";
+import type {
+  AwarenessCursor,
+  ParticipantSummary,
+  RoomSummary,
+} from "@architect/contracts";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { createTLStore, Tldraw, type Editor, type TLStore } from "tldraw";
 import "tldraw/tldraw.css";
-import { loadGuestProfile } from "../rooms/profile";
 import { createRoomCollab } from "../workspace/collab";
 import { CursorOverlay } from "../workspace/CursorOverlay";
 import { MemberStrip } from "../workspace/MemberStrip";
@@ -21,6 +24,28 @@ type WhiteboardProps = {
 type CanvasState = "connecting" | "ready" | "error";
 
 export function Whiteboard({ room }: WhiteboardProps) {
+  const localParticipant = room.currentParticipantId
+    ? room.participants.find(
+        (participant) => participant.id === room.currentParticipantId,
+      )
+    : undefined;
+  if (!localParticipant) {
+    return (
+      <div className="whiteboard-state">
+        <p role="alert">
+          Your room session is unavailable. Join the room again to collaborate.
+        </p>
+      </div>
+    );
+  }
+
+  return <ConnectedWhiteboard localParticipant={localParticipant} room={room} />;
+}
+
+function ConnectedWhiteboard({
+  localParticipant,
+  room,
+}: WhiteboardProps & { localParticipant: ParticipantSummary }) {
   const [canvasState, setCanvasState] = useState<CanvasState>("connecting");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [cursor, setCursor] = useState<AwarenessCursor | undefined>();
@@ -32,23 +57,6 @@ export function Whiteboard({ room }: WhiteboardProps) {
     ReturnType<typeof createBoundedCursorPublisher> | undefined
   >(undefined);
 
-  const localParticipant = useMemo(() => {
-    const guestProfile = loadGuestProfile();
-    return (
-      (guestProfile
-        ? room.participants.find(
-            (participant) =>
-              participant.name === guestProfile.name &&
-              participant.color.toLowerCase() === guestProfile.color.toLowerCase(),
-          )
-        : undefined) ??
-      room.participants[0] ?? {
-        id: `participant-${room.id}`,
-        name: "Collaborator",
-        color: "#10A37F",
-      }
-    );
-  }, [room.id, room.participants]);
   const identity = useMemo(
     () => ({
       participantId: localParticipant.id,
@@ -68,6 +76,7 @@ export function Whiteboard({ room }: WhiteboardProps) {
     });
     cursorPublisherRef.current = publisher;
     return () => {
+      publisher.clear();
       cursorPublisherRef.current = undefined;
       publisher.destroy();
     };
@@ -112,6 +121,7 @@ export function Whiteboard({ room }: WhiteboardProps) {
         });
         setStore(drawingStore);
         setCanvasState("ready");
+        setConnectionError(null);
       } catch {
         binding?.destroy();
         binding = null;
@@ -127,8 +137,10 @@ export function Whiteboard({ room }: WhiteboardProps) {
     const receiveStatus = ({ status }: { status: string }) => {
       if (!active) return;
       if (status === "disconnected") {
-        setConnectionError("Shared canvas connection is unavailable.");
-      } else if (status === "connected" && drawingStore) {
+        setConnectionError(
+          "Shared canvas connection is unavailable. Retrying…",
+        );
+      } else if (status === "connected") {
         setConnectionError(null);
       }
     };
@@ -160,6 +172,8 @@ export function Whiteboard({ room }: WhiteboardProps) {
       <div className="whiteboard-state">
         {canvasState === "error" ? (
           <p role="alert">{connectionError}</p>
+        ) : connectionError ? (
+          <p role="alert">{connectionError}</p>
         ) : (
           <p role="status">Connecting shared canvas…</p>
         )}
@@ -170,7 +184,11 @@ export function Whiteboard({ room }: WhiteboardProps) {
   if (canvasState !== "ready" || !store) {
     return (
       <div className="whiteboard-state">
-        <p role="status">Connecting shared canvas…</p>
+        {connectionError ? (
+          <p role="alert">{connectionError}</p>
+        ) : (
+          <p role="status">Connecting shared canvas…</p>
+        )}
       </div>
     );
   }
@@ -190,7 +208,7 @@ export function Whiteboard({ room }: WhiteboardProps) {
         </header>
         <div
           className="whiteboard__canvas"
-          onPointerLeave={() => setCursor(undefined)}
+          onPointerLeave={() => cursorPublisherRef.current?.clear()}
           onPointerMoveCapture={publishPointer}
         >
           <Tldraw

@@ -45,4 +45,26 @@ describe("createBoundedCursorPublisher", () => {
 
     expect(onPublish).toHaveBeenCalledOnce();
   });
+
+  it("publishes absence, cancels queued motion, and resets cadence on clear", () => {
+    vi.useFakeTimers();
+    const onPublish = vi.fn();
+    const publisher = createBoundedCursorPublisher({ intervalMs: 50, onPublish });
+
+    publisher.move({ x: 10, y: 10 });
+    publisher.move({ x: 30, y: 30 });
+    publisher.clear();
+
+    expect(onPublish.mock.calls).toEqual([
+      [{ x: 10, y: 10 }],
+      [undefined],
+    ]);
+    vi.advanceTimersByTime(50);
+    expect(onPublish).toHaveBeenCalledTimes(2);
+
+    publisher.move({ x: 10, y: 10 });
+    expect(onPublish).toHaveBeenLastCalledWith({ x: 10, y: 10 });
+    expect(onPublish).toHaveBeenCalledTimes(3);
+    publisher.destroy();
+  });
 });
