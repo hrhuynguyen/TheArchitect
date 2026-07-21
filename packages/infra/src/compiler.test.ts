@@ -729,44 +729,166 @@ describe("compileIntent", () => {
     );
     expect(architectureSchema.safeParse(resourceHeavy.architecture).success).toBe(true);
 
-    const relationshipHeavy = compileIntent(
-      {
-        version: "infrastructure-intent/v1",
-        resources: [
-          {
-            id: "source",
-            type: "Lambda",
-            name: "Source",
-            count: 20,
-            properties: {},
-          },
-          {
-            id: "target",
-            type: "SQS",
-            name: "Target",
-            count: 20,
-            properties: {},
-          },
-        ],
-        relationships: ["one", "two", "three"].map((label) => ({
-          id: `fanout-${label}`,
-          sourceId: "source",
-          targetId: "target",
-          kind: "connects" as const,
-          label,
-        })),
-      },
+    const relationshipHeavyIntent: InfrastructureIntent = {
+      version: "infrastructure-intent/v1",
+      resources: [
+        {
+          id: "source",
+          type: "Lambda",
+          name: "Source",
+          count: 20,
+          properties: {},
+        },
+        {
+          id: "target",
+          type: "SQS",
+          name: "Target",
+          count: 20,
+          properties: {},
+        },
+      ],
+      relationships: ["one", "two", "three"].map((label) => ({
+        id: `fanout-${label}`,
+        sourceId: "source",
+        targetId: "target",
+        kind: "connects" as const,
+        label,
+      })),
+    };
+    let relationshipHeavy!: ReturnType<typeof compileIntent>;
+    expect(() => {
+      relationshipHeavy = compileIntent(
+        relationshipHeavyIntent,
+        baseRequirements(),
+      );
+    }).not.toThrow();
+    const repeatedRelationshipHeavy = compileIntent(
+      relationshipHeavyIntent,
       baseRequirements(),
+    );
+    const relationshipResourceIds = new Set(
+      relationshipHeavy.architecture.resources.map((resource) => resource.id),
+    );
+    const relationshipLimitDiagnostics = relationshipHeavy.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "ARCHITECTURE_RELATIONSHIP_LIMIT",
     );
 
     expect(relationshipHeavy.architecture.relationships.length).toBeLessThanOrEqual(1_000);
-    expect(relationshipHeavy.diagnostics).toContainEqual(
+    expect(relationshipLimitDiagnostics).toEqual([
       expect.objectContaining({
         level: "error",
         code: "ARCHITECTURE_RELATIONSHIP_LIMIT",
+        path: "relationships",
       }),
-    );
+    ]);
+    expect(repeatedRelationshipHeavy).toEqual(relationshipHeavy);
+    expect(
+      new Set(
+        relationshipHeavy.architecture.relationships.map(
+          (relationship) => relationship.id,
+        ),
+      ).size,
+    ).toBe(relationshipHeavy.architecture.relationships.length);
+    expect(
+      relationshipHeavy.architecture.relationships.every(
+        (relationship) =>
+          relationshipResourceIds.has(relationship.sourceId) &&
+          relationshipResourceIds.has(relationship.targetId),
+      ),
+    ).toBe(true);
     expect(architectureSchema.safeParse(relationshipHeavy.architecture).success).toBe(true);
+  });
+
+  it("caps owner-local generated resources at the architecture contract limit", () => {
+    const pairCount = 81;
+    const pairIds = Array.from({ length: pairCount }, (_, index) =>
+      String(index).padStart(3, "0"),
+    );
+    const intent: InfrastructureIntent = {
+      version: "infrastructure-intent/v1",
+      resources: pairIds.flatMap((suffix) => [
+        {
+          id: `vpc-${suffix}`,
+          type: "VPC" as const,
+          name: `VPC ${suffix}`,
+          properties: { maxAvailabilityZones: 2 },
+        },
+        {
+          id: `elb-${suffix}`,
+          type: "ELB" as const,
+          name: `Load balancer ${suffix}`,
+          zone: "public" as const,
+          properties: {},
+        },
+      ]),
+      relationships: pairIds.map((suffix) => ({
+        id: `vpc-contains-elb-${suffix}`,
+        sourceId: `vpc-${suffix}`,
+        targetId: `elb-${suffix}`,
+        kind: "contains" as const,
+      })),
+    };
+    let first!: ReturnType<typeof compileIntent>;
+    expect(() => {
+      first = compileIntent(intent, baseRequirements());
+    }).not.toThrow();
+    const second = compileIntent(intent, baseRequirements());
+    const resourceIds = new Set(
+      first.architecture.resources.map((resource) => resource.id),
+    );
+    const explicitResourceIds = new Set(
+      first.architecture.resources
+        .filter((resource) => resource.origin === "explicit")
+        .map((resource) => resource.id),
+    );
+    const explicitRelationships = first.architecture.relationships.filter(
+      (relationship) => relationship.origin === "explicit",
+    );
+    const resourceLimitDiagnostics = first.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "ARCHITECTURE_RESOURCE_LIMIT",
+    );
+
+    expect(first).toEqual(second);
+    expect(first.architecture.resources.length).toBeLessThanOrEqual(400);
+    expect(resourceIds.size).toBe(first.architecture.resources.length);
+    expect(explicitResourceIds).toEqual(
+      new Set(
+        pairIds.flatMap((suffix) => [`vpc-${suffix}`, `elb-${suffix}`]),
+      ),
+    );
+    expect(explicitRelationships).toHaveLength(pairCount);
+    expect(
+      pairIds.every((suffix) =>
+        explicitRelationships.some(
+          (relationship) =>
+            relationship.kind === "contains" &&
+            relationship.sourceId === `vpc-${suffix}` &&
+            relationship.targetId === `elb-${suffix}`,
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      first.architecture.relationships.every(
+        (relationship) =>
+          resourceIds.has(relationship.sourceId) &&
+          resourceIds.has(relationship.targetId),
+      ),
+    ).toBe(true);
+    expect(resourceLimitDiagnostics).toEqual([
+      expect.objectContaining({
+        level: "error",
+        code: "ARCHITECTURE_RESOURCE_LIMIT",
+        resourceId: "inferred-subnet-public-vpc-079-secondary-2",
+        path: "resources",
+      }),
+    ]);
+    expect(resourceLimitDiagnostics[0]?.message).toContain("400");
+    expect(architectureSchema.safeParse(first.architecture).success).toBe(true);
+    expect(
+      architectureSchema.safeParse(
+        materializeApprovedArchitecture(first.deploymentPlan),
+      ).success,
+    ).toBe(true);
   });
 
   it("chunks high-cardinality graph proposals without losing stage approval facts", () => {

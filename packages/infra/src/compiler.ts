@@ -61,7 +61,7 @@ const EXPLICIT_INGRESS_TYPES: ReadonlySet<AwsResourceType> = new Set([
   "APIGateway",
   "CloudFront",
 ]);
-const MAX_EXPLICIT_ARCHITECTURE_RESOURCES = 390;
+const MAX_ARCHITECTURE_RESOURCES = 400;
 const MAX_ARCHITECTURE_RELATIONSHIPS = 1_000;
 const MAX_STAGE_PROPOSAL_AFFECTS = 200;
 
@@ -367,6 +367,20 @@ function compileCore(
   const explicitBySourceId = new Map<string, InfrastructureIntentResource>();
   const expandedBySourceId = new Map<string, WorkingResource[]>();
   const resources: WorkingResource[] = [];
+  let resourceLimitReported = false;
+  const reportResourceLimit = (resourceId: string): void => {
+    if (resourceLimitReported) return;
+    diagnostics.push({
+      level: "error",
+      code: "ARCHITECTURE_RESOURCE_LIMIT",
+      message: `Architecture reached the ${MAX_ARCHITECTURE_RESOURCES}-resource contract limit; ${resourceId} and dependent topology were skipped.`,
+      path: "resources",
+      resourceId,
+      suggestion:
+        "Reduce repeated resources or split the architecture into bounded revisions.",
+    });
+    resourceLimitReported = true;
+  };
 
   for (const intentResource of [...intent.resources].sort(compareIntentResources)) {
     if (explicitBySourceId.has(intentResource.id)) {
@@ -385,16 +399,8 @@ function compileCore(
     const count = intentResource.count ?? 1;
     const expanded: WorkingResource[] = [];
     for (let index = 0; index < count; index += 1) {
-      if (resources.length >= MAX_EXPLICIT_ARCHITECTURE_RESOURCES) {
-        if (!diagnostics.some((item) => item.code === "ARCHITECTURE_RESOURCE_LIMIT")) {
-          diagnostics.push({
-            level: "error",
-            code: "ARCHITECTURE_RESOURCE_LIMIT",
-            message: `Expanded intent exceeds the ${MAX_EXPLICIT_ARCHITECTURE_RESOURCES} explicit-resource compilation limit.`,
-            path: "resources",
-            suggestion: "Reduce repeated resource counts or split the architecture into bounded revisions.",
-          });
-        }
+      if (resources.length >= MAX_ARCHITECTURE_RESOURCES) {
+        reportResourceLimit(intentResource.id);
         break;
       }
       const requestedId = count === 1 ? intentResource.id : `${intentResource.id}-${index + 1}`;
@@ -477,7 +483,11 @@ function compileCore(
 
   const addGeneratedResource = (
     input: Omit<WorkingResource, "id" | "sourceId"> & { requestedId: string },
-  ): WorkingResource => {
+  ): WorkingResource | undefined => {
+    if (resources.length >= MAX_ARCHITECTURE_RESOURCES) {
+      reportResourceLimit(input.requestedId);
+      return undefined;
+    }
     const id = reserveId(input.requestedId, usedResourceIds, 120);
     const resource: WorkingResource = {
       id,
@@ -697,6 +707,7 @@ function compileCore(
         approvalStatus: "pending",
         zone: primaryCompute.zone,
       });
+      if (!replica) break;
       computeReplicaPrimaryIds.set(replica.id, primaryCompute.id);
     }
   }
@@ -1037,6 +1048,7 @@ function compileCore(
         approvalStatus: "not-required",
         zone: "public",
       });
+      if (!subnet) return;
       subnets.push(subnet);
       subnets.sort((left, right) => compareText(left.id, right.id));
       publicSubnets.push(subnet);
@@ -1093,6 +1105,7 @@ function compileCore(
       approvalStatus: "not-required",
       zone: subnetType,
     });
+    if (!subnet) return;
     subnets.push(subnet);
     subnets.sort((left, right) => compareText(left.id, right.id));
     (publicPlacement ? publicSubnets : privateSubnets).push(subnet);
@@ -1178,6 +1191,7 @@ function compileCore(
       approvalStatus: "pending",
       zone: subnetType,
     });
+    if (!subnet) return;
     subnets.push(subnet);
     subnets.sort((left, right) => compareText(left.id, right.id));
     (publicPlacement ? publicSubnets : privateSubnets).push(subnet);
@@ -1221,6 +1235,7 @@ function compileCore(
       approvalStatus: "not-required",
       zone: "private",
     });
+    if (!securityGroup) return;
     securityGroups.push(securityGroup);
     securityGroups.sort((left, right) => compareText(left.id, right.id));
     resourceOwnerIds.set(securityGroup.id, new Set([ownerId]));
