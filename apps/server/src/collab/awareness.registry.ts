@@ -105,9 +105,10 @@ export function createAwarenessRegistry(options: RegistryOptions = {}) {
       if (sockets.get(socketId) !== roomId) return;
       const socket = rooms.get(roomId)?.get(socketId);
       if (!socket) return;
+      const wasVisible = socket.visible;
       socket.lastSeenAt = now();
       socket.visible = true;
-      notify(roomId);
+      if (!wasVisible) notify(roomId);
     },
 
     updateClient(

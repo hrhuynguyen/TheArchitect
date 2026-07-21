@@ -128,6 +128,52 @@ afterEach(() => {
 });
 
 describe("transient awareness registry", () => {
+  it("does not notify subscribers for routine visible heartbeats", () => {
+    vi.useFakeTimers();
+    let now = 0;
+    const registry = createAwarenessRegistry({
+      cleanupIntervalMs: 100,
+      now: () => now,
+      staleAfterMs: 1_000,
+    });
+    const listener = vi.fn();
+    registry.subscribe(listener);
+    registry.connect(roomId, "socket-a", {
+      participantId,
+      name: "Grace",
+      color: "#ABCDEF",
+      phase: "sketch",
+    });
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    now = 100;
+    registry.heartbeat(roomId, "socket-a");
+    expect(registry.list(roomId)[0]?.lastSeenAt).toBe(
+      "1970-01-01T00:00:00.100Z",
+    );
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    registry.updateClient(roomId, "socket-a", 101, { phase: "architect" });
+    expect(listener).toHaveBeenCalledTimes(2);
+    now = 200;
+    registry.heartbeat(roomId, "socket-a");
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    now = 1_201;
+    vi.advanceTimersByTime(100);
+    expect(listener).toHaveBeenCalledTimes(3);
+    registry.heartbeat(roomId, "socket-a");
+    expect(listener).toHaveBeenCalledTimes(4);
+    registry.heartbeat(roomId, "socket-a");
+    expect(listener).toHaveBeenCalledTimes(4);
+
+    registry.removeClient(roomId, "socket-a", 101);
+    expect(listener).toHaveBeenCalledTimes(5);
+    registry.disconnect(roomId, "socket-a");
+    expect(listener).toHaveBeenCalledTimes(6);
+    registry.destroy();
+  });
+
   it("binds cursor and phase changes to the authenticated socket owner", () => {
     let now = Date.parse("2026-07-21T12:00:00.000Z");
     const registry = createAwarenessRegistry({ now: () => now });

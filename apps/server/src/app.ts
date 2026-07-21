@@ -1,4 +1,4 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyServerOptions } from "fastify";
 import { parseEnv } from "./config/env.js";
 import { databaseHealth } from "./db/health.js";
 import {
@@ -13,12 +13,13 @@ import {
 
 type BuildAppOptions = {
   databaseHealth?: typeof databaseHealth;
+  logger?: FastifyServerOptions["logger"];
   roomConfig?: RoomRouteConfig;
   roomService?: RoomService;
 };
 
 export function buildApp(options: BuildAppOptions = {}) {
-  const app = Fastify();
+  const app = Fastify({ logger: options.logger ?? false });
   const checkDatabaseHealth = options.databaseHealth ?? databaseHealth;
   const runtimeConfig = () => {
     if (options.roomConfig) return options.roomConfig;

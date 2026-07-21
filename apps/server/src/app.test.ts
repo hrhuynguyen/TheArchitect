@@ -2,6 +2,36 @@ import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "./app";
 
 describe("server app", () => {
+  it("enables a capturable Fastify logger only when configured", async () => {
+    const lines: string[] = [];
+    const app = buildApp({
+      logger: {
+        level: "info",
+        stream: { write: (line: string) => lines.push(line) },
+      },
+    });
+
+    try {
+      app.log.info({ probe: "runtime" }, "logger probe");
+
+      expect(lines.map((line) => JSON.parse(line))).toContainEqual(
+        expect.objectContaining({ probe: "runtime", msg: "logger probe" }),
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps the default test logger disabled", async () => {
+    const app = buildApp();
+
+    try {
+      expect(app.log.info.name).toBe("noop");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("reports service health", async () => {
     const databaseHealth = vi.fn().mockRejectedValue(new Error("offline"));
     const app = buildApp({ databaseHealth });
