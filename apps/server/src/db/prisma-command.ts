@@ -36,7 +36,6 @@ function exitStatusForSignal(signal: NodeJS.Signals): number {
 type RunPrismaCommandOptions = {
   envFilePath?: string;
   environment?: NodeJS.ProcessEnv;
-  platform?: NodeJS.Platform;
   signals?: SignalSource;
   spawnCommand?: SpawnCommand;
   stdio?: StdioOptions;
@@ -47,21 +46,38 @@ export async function runPrismaCommand(
   {
     envFilePath,
     environment = process.env,
-    platform = process.platform,
     signals = process,
     spawnCommand = spawnCommandFromPath,
     stdio = "inherit",
   }: RunPrismaCommandOptions = {},
 ): Promise<number> {
+  const npmExecPath = environment.npm_execpath;
+  if (!npmExecPath) {
+    throw new Error(
+      "Prisma CLI wrapper requires npm_execpath; run it through an npm script.",
+    );
+  }
+
   loadRootEnv(environment, envFilePath);
 
   return new Promise((resolve, reject) => {
-    const executable = platform === "win32" ? "prisma.cmd" : "prisma";
-    const child = spawnCommand(executable, args, {
-      env: environment,
-      shell: false,
-      stdio,
-    });
+    const child = spawnCommand(
+      process.execPath,
+      [
+        npmExecPath,
+        "exec",
+        "--offline",
+        "--yes=false",
+        "--",
+        "prisma",
+        ...args,
+      ],
+      {
+        env: environment,
+        shell: false,
+        stdio,
+      },
+    );
     let settled = false;
 
     const forwardSigint = () => {

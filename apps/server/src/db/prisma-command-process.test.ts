@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import { runPrismaCommand } from "./prisma-command";
 
-function createProcessHarness(platform: NodeJS.Platform = "darwin") {
+function createProcessHarness() {
   const child = Object.assign(new EventEmitter(), {
     kill: vi.fn((_signal: NodeJS.Signals) => true),
   });
@@ -11,13 +11,13 @@ function createProcessHarness(platform: NodeJS.Platform = "darwin") {
   const environment = {
     ...process.env,
     DATABASE_URL: "postgresql://safe-process-harness/example",
+    npm_execpath: "/safe/npm-cli.js",
   };
 
   const run = () =>
     runPrismaCommand(["validate"], {
       environment,
       envFilePath: "/missing/architect/.env",
-      platform,
       signals,
       spawnCommand,
       stdio: "ignore",
@@ -27,25 +27,43 @@ function createProcessHarness(platform: NodeJS.Platform = "darwin") {
 }
 
 describe("runPrismaCommand process lifecycle", () => {
-  it.each([
-    ["darwin", "prisma"],
-    ["win32", "prisma.cmd"],
-  ] as const)("selects the npm PATH executable on %s", async (platform, expected) => {
-    const harness = createProcessHarness(platform);
+  it("uses Node and npm's injected CLI path without a platform shim", async () => {
+    const harness = createProcessHarness();
     const command = harness.run();
 
     harness.child.emit("exit", 0, null);
     await command;
 
     expect(harness.spawnCommand).toHaveBeenCalledWith(
-      expected,
-      ["validate"],
+      process.execPath,
+      [
+        "/safe/npm-cli.js",
+        "exec",
+        "--offline",
+        "--yes=false",
+        "--",
+        "prisma",
+        "validate",
+      ],
       expect.objectContaining({
         env: harness.environment,
         shell: false,
         stdio: "ignore",
       }),
     );
+  });
+
+  it("rejects a direct invocation without npm_execpath", async () => {
+    const harness = createProcessHarness();
+    delete harness.environment.npm_execpath;
+    const command = harness.run();
+
+    harness.child.emit("exit", 0, null);
+
+    await expect(command).rejects.toThrow(
+      "Prisma CLI wrapper requires npm_execpath; run it through an npm script.",
+    );
+    expect(harness.spawnCommand).not.toHaveBeenCalled();
   });
 
   it("preserves a nonzero child exit status", async () => {
