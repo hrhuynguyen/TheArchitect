@@ -235,6 +235,46 @@ describe("compileIntent", () => {
     ]);
   });
 
+  it("keeps compiler metadata outside the 100-property resource quota", () => {
+    const properties = Object.fromEntries(
+      Array.from({ length: 100 }, (_, index) => [`property-${index}`, index]),
+    );
+    const result = compileIntent(
+      {
+        version: "infrastructure-intent/v1",
+        resources: [
+          {
+            id: "app",
+            type: "EC2",
+            name: "Application",
+            zone: "private",
+            properties,
+          },
+        ],
+        relationships: [],
+      },
+      baseRequirements({
+        audience: "internal",
+        expectedUsers: "global",
+        asyncWorkload: true,
+      }),
+    );
+    const replica = result.architecture.resources.find(
+      (resource) => resource.type === "EC2" && resource.origin === "stage-upgrade",
+    );
+
+    expect(replica?.properties).toEqual(properties);
+    expect(Object.keys(replica?.properties ?? {})).toHaveLength(100);
+    expect(
+      result.architecture.resources.every(
+        (resource) => !("stageUpgrade" in resource.properties),
+      ),
+    ).toBe(true);
+    expect(architectureSchema.parse(result.architecture)).toEqual(
+      result.architecture,
+    );
+  });
+
   it("marks generated topology relationships inferred when all nodes are explicit", () => {
     const result = compileIntent(
       {
@@ -729,6 +769,69 @@ describe("compileIntent", () => {
     expect(architectureSchema.safeParse(relationshipHeavy.architecture).success).toBe(true);
   });
 
+  it("chunks high-cardinality graph proposals without losing stage approval facts", () => {
+    const result = compileIntent(
+      {
+        version: "infrastructure-intent/v1",
+        resources: [
+          { id: "user", type: "External", name: "User", properties: {} },
+          ...Array.from({ length: 11 }, (_, index) => ({
+            id: `app-${String(index).padStart(2, "0")}`,
+            type: "EC2" as const,
+            name: `Application ${index}`,
+            count: 20,
+            zone: "public" as const,
+            properties: {},
+          })),
+        ],
+        relationships: Array.from({ length: 11 }, (_, index) => ({
+          sourceId: "user",
+          targetId: `app-${String(index).padStart(2, "0")}`,
+          kind: "routes" as const,
+        })),
+      },
+      criticalExternalRequirements,
+    );
+    const affectedIds = new Set(
+      result.stageDecision.proposedUpgrades.flatMap((proposal) => proposal.affects),
+    );
+    const pendingResources = result.architecture.resources.filter(
+      (resource) =>
+        resource.origin === "stage-upgrade" &&
+        resource.approvalStatus === "pending",
+    );
+    const pendingRelationships = result.architecture.relationships.filter(
+      (relationship) =>
+        relationship.origin === "stage-upgrade" &&
+        relationship.approvalStatus === "pending",
+    );
+
+    expect(
+      result.stageDecision.proposedUpgrades.every(
+        (proposal) => proposal.affects.length <= 200,
+      ),
+    ).toBe(true);
+    expect(
+      pendingResources.every((resource) => affectedIds.has(resource.id)),
+    ).toBe(true);
+    expect(
+      pendingRelationships.every(
+        (relationship) =>
+          affectedIds.has(relationship.sourceId) &&
+          affectedIds.has(relationship.targetId),
+      ),
+    ).toBe(true);
+    expect(result.stageDecision.requiresApproval).toBe(
+      result.deploymentPlan.requiresApproval,
+    );
+    expect(stageDecisionSchema.parse(result.stageDecision)).toEqual(
+      result.stageDecision,
+    );
+    expect(deploymentPlanSchema.parse(result.deploymentPlan)).toEqual(
+      result.deploymentPlan,
+    );
+  });
+
   it("bounds generated IDs and names for maximum-length schema-valid intent fields", () => {
     const sourceId = "a".repeat(120);
     const sourceName = "Application ".repeat(11).slice(0, 120);
@@ -902,6 +1005,94 @@ describe("compileIntent", () => {
           .map((relationship) => relationship.sourceId),
       ).size,
     ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("treats an explicit one-AZ VPC cap as a blocking topology constraint", () => {
+    const result = compileIntent(
+      {
+        version: "infrastructure-intent/v1",
+        resources: [
+          {
+            id: "vpc",
+            type: "VPC",
+            name: "Single-AZ VPC",
+            zone: "regional",
+            properties: { maxAvailabilityZones: 1 },
+          },
+          {
+            id: "app",
+            type: "EC2",
+            name: "Application",
+            zone: "private",
+            properties: {},
+          },
+        ],
+        relationships: [],
+      },
+      baseRequirements({
+        audience: "internal",
+        availability: "continuous",
+      }),
+    );
+    const computeIds = new Set(
+      result.architecture.resources
+        .filter((resource) => resource.type === "EC2")
+        .map((resource) => resource.id),
+    );
+    const computeSubnetIds = new Set(
+      result.architecture.relationships
+        .filter(
+          (relationship) =>
+            relationship.kind === "hosts" && computeIds.has(relationship.targetId),
+        )
+        .map((relationship) => relationship.sourceId),
+    );
+
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        level: "error",
+        code: "VPC_AVAILABILITY_ZONE_CAP",
+        resourceId: "vpc",
+      }),
+    );
+    expect(
+      result.architecture.resources.some(
+        (resource) => resource.id === "stage-subnet-secondary",
+      ),
+    ).toBe(false);
+    expect(
+      result.architecture.resources.some(
+        (resource) =>
+          resource.type === "Subnet" &&
+          resource.properties.availabilityZone === "secondary",
+      ),
+    ).toBe(false);
+    expect(computeSubnetIds.size).toBe(1);
+    expect(
+      result.architecture.resources.find((resource) => resource.id === "vpc")
+        ?.properties.maxAvailabilityZones,
+    ).toBe(1);
+    expect(result.stageDecision).toMatchObject({
+      stage: "production",
+      requiresApproval: true,
+    });
+    expect(result.stageDecision.requiresApproval).toBe(
+      result.deploymentPlan.requiresApproval,
+    );
+
+    const beforeApproval = materializeApprovedArchitecture(result.deploymentPlan);
+    expect(
+      beforeApproval.resources.find((resource) => resource.id === "vpc")?.properties
+        .maxAvailabilityZones,
+    ).toBe(1);
+    expect(
+      beforeApproval.resources.some(
+        (resource) => resource.id === "stage-subnet-secondary",
+      ),
+    ).toBe(false);
+    expect(
+      beforeApproval.resources.filter((resource) => resource.type === "EC2"),
+    ).toHaveLength(1);
   });
 
   it("snapshots representative prototype and production compilations", () => {

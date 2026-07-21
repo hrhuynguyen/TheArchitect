@@ -63,6 +63,7 @@ const EXPLICIT_INGRESS_TYPES: ReadonlySet<AwsResourceType> = new Set([
 ]);
 const MAX_EXPLICIT_ARCHITECTURE_RESOURCES = 390;
 const MAX_ARCHITECTURE_RELATIONSHIPS = 1_000;
+const MAX_STAGE_PROPOSAL_AFFECTS = 200;
 
 const DIAGNOSTIC_LEVEL_ORDER: Record<Diagnostic["level"], number> = {
   error: 0,
@@ -203,7 +204,18 @@ function reconcileStageDecision(
     const affects = [...new Set(resourceIds)].sort(compareText);
     if (affects.length === 0) return;
     affects.forEach((resourceId) => assignedResourceIds.add(resourceId));
-    proposedUpgrades.push({ id, title, summary, affects });
+    const partCount = Math.ceil(affects.length / MAX_STAGE_PROPOSAL_AFFECTS);
+    for (let partIndex = 0; partIndex < partCount; partIndex += 1) {
+      proposedUpgrades.push({
+        id: partCount === 1 ? id : `${id}-part-${partIndex + 1}`,
+        title,
+        summary,
+        affects: affects.slice(
+          partIndex * MAX_STAGE_PROPOSAL_AFFECTS,
+          (partIndex + 1) * MAX_STAGE_PROPOSAL_AFFECTS,
+        ),
+      });
+    }
   };
 
   const hasPendingIngress = pendingResources.some((resource) => resource.type === "ELB");
@@ -587,7 +599,7 @@ function compileCore(
         requestedId: generatedId(["stage", primaryCompute.sourceId, "replica", String(index)]),
         type: "EC2",
         name: nameWithSuffix(primaryCompute.name, ` replica ${index}`),
-        properties: { ...primaryCompute.properties, stageUpgrade: true },
+        properties: { ...primaryCompute.properties },
         origin: "stage-upgrade",
         reason: `The ${stageRecommendation.stage} stage proposes redundant compute capacity.`,
         approvalStatus: "pending",
@@ -612,7 +624,7 @@ function compileCore(
       requestedId: "stage-elb",
       type: "ELB",
       name: "Recommended load balancer",
-      properties: { scheme: "internet-facing", stageUpgrade: true },
+      properties: { scheme: "internet-facing" },
       origin: "stage-upgrade",
       reason: `The ${stageRecommendation.stage} stage proposes managed ingress before EC2.`,
       approvalStatus: "pending",
@@ -639,28 +651,48 @@ function compileCore(
   const needsProductionSubnet =
     stageRecommendation.stage === "production" &&
     resourcesOfType("Subnet").length < 2;
+  const vpcCandidates = resourcesOfType("VPC");
+  const [onlyVpcCandidate] = vpcCandidates;
+  const singleAzVpcCap =
+    vpcCandidates.length === 1 &&
+    onlyVpcCandidate?.origin === "explicit" &&
+    typeof onlyVpcCandidate.properties.maxAvailabilityZones === "number" &&
+    onlyVpcCandidate.properties.maxAvailabilityZones <= 1
+      ? onlyVpcCandidate
+      : undefined;
   if (
     hasType("VPC") &&
     (needsStagedPublicSubnet || needsStagedComputeSubnet || needsProductionSubnet)
   ) {
-    const publicUpgrade =
-      needsStagedPublicSubnet ||
-      (needsStagedComputeSubnet && computeUsesPublicSubnets) ||
-      directExternalComputeIds.size > 0;
-    addGeneratedResource({
-      requestedId: "stage-subnet-secondary",
-      type: "Subnet",
-      name: "Recommended secondary subnet",
-      properties: {
-        availabilityZone: "secondary",
-        subnetType: publicUpgrade ? "public" : "private",
-        stageUpgrade: true,
-      },
-      origin: "stage-upgrade",
-      reason: `The ${stageRecommendation.stage} stage proposes capacity in a second availability zone.`,
-      approvalStatus: "pending",
-      zone: publicUpgrade ? "public" : "private",
-    });
+    if (singleAzVpcCap) {
+      diagnostics.push({
+        level: "error",
+        code: "VPC_AVAILABILITY_ZONE_CAP",
+        message: `${singleAzVpcCap.name} is explicitly capped at one availability zone, which blocks the ${stageRecommendation.stage} multi-zone topology.`,
+        path: `resources.${singleAzVpcCap.id}.properties.maxAvailabilityZones`,
+        resourceId: singleAzVpcCap.id,
+        suggestion:
+          "Increase maxAvailabilityZones to at least 2 or lower the workload availability requirements.",
+      });
+    } else {
+      const publicUpgrade =
+        needsStagedPublicSubnet ||
+        (needsStagedComputeSubnet && computeUsesPublicSubnets) ||
+        directExternalComputeIds.size > 0;
+      addGeneratedResource({
+        requestedId: "stage-subnet-secondary",
+        type: "Subnet",
+        name: "Recommended secondary subnet",
+        properties: {
+          availabilityZone: "secondary",
+          subnetType: publicUpgrade ? "public" : "private",
+        },
+        origin: "stage-upgrade",
+        reason: `The ${stageRecommendation.stage} stage proposes capacity in a second availability zone.`,
+        approvalStatus: "pending",
+        zone: publicUpgrade ? "public" : "private",
+      });
+    }
   }
 
   const relationships: ArchitectureRelationship[] = [];
