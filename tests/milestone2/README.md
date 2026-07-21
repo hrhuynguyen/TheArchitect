@@ -12,6 +12,11 @@ PostgreSQL container plus dynamically ported server and web child processes. It
 migrates only that database and removes only those owned resources in teardown;
 it does not use the repository's shared Compose volume.
 
+The production Next build also runs from a unique harness-owned temporary web
+project. Build and start share that project's output directory, and teardown
+removes only the temporary project. The smoke does not write to the checkout's
+shared `apps/web/.next`, `next-env.d.ts`, or `tsconfig.json`.
+
 The scenario creates a shared room in two isolated browser contexts, verifies
 presence, bidirectional synchronized drawing, synchronized requirements,
 restart recovery, readiness progress and the 80% gate, then queries its isolated

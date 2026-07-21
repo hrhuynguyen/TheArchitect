@@ -7,6 +7,7 @@ export default defineConfig({
   reporter: "line",
   retries: 0,
   testDir: "./tests/milestone2",
+  testMatch: "milestone2.spec.ts",
   timeout: 120_000,
   use: {
     actionTimeout: 15_000,

@@ -4,6 +4,10 @@ import { once } from "node:events";
 import net from "node:net";
 import path from "node:path";
 import { promisify } from "node:util";
+import {
+  createOwnedWebProject,
+  type OwnedWebProject,
+} from "./web-output.js";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = path.resolve(process.cwd());
@@ -149,6 +153,7 @@ export async function startMilestone2Environment(): Promise<Milestone2Environmen
   const webUrl = `http://${loopback}:${webPort}`;
   let containerStarted = false;
   let serverProcess: OwnedProcess | undefined;
+  let webProject: OwnedWebProject | undefined;
   let webProcess: OwnedProcess | undefined;
   let stopped = false;
 
@@ -167,6 +172,14 @@ export async function startMilestone2Environment(): Promise<Milestone2Environmen
       try {
         await docker(["rm", "--force", containerName]);
         containerStarted = false;
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (webProject) {
+      try {
+        await webProject.cleanup();
+        webProject = undefined;
       } catch (error) {
         failures.push(error);
       }
@@ -246,17 +259,23 @@ export async function startMilestone2Environment(): Promise<Milestone2Environmen
     };
     await launchServer();
 
+    webProject = await createOwnedWebProject({ repositoryRoot });
     const webEnv = {
       ...process.env,
       ARCHITECT_SERVER_URL: httpUrl,
+      ARCHITECT_NEXT_DIST_DIR: webProject.distDir,
       NEXT_PUBLIC_API_URL: httpUrl,
       NEXT_PUBLIC_WS_URL: `ws://${loopback}:${wsPort}`,
       NEXT_TELEMETRY_DISABLED: "1",
       NODE_ENV: "production",
     };
     await execFileAsync(
-      "npm",
-      ["run", "build", "--workspace", "@architect/web"],
+      process.execPath,
+      [
+        "node_modules/next/dist/bin/next",
+        "build",
+        webProject.webRoot,
+      ],
       {
         cwd: repositoryRoot,
         env: webEnv,
@@ -268,7 +287,7 @@ export async function startMilestone2Environment(): Promise<Milestone2Environmen
       [
         "node_modules/next/dist/bin/next",
         "start",
-        "apps/web",
+        webProject.webRoot,
         "-p",
         String(webPort),
       ],
