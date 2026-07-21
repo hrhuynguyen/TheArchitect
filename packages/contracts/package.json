@@ -7,7 +7,8 @@
     ".": "./src/index.ts",
     "./collaboration": "./src/collaboration.ts",
     "./requirements": "./src/requirements.ts",
-    "./rooms": "./src/rooms.ts"
+    "./rooms": "./src/rooms.ts",
+    "./voting": "./src/voting.ts"
   },
   "scripts": {
     "test": "vitest run",

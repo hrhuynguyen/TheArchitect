@@ -3,6 +3,7 @@
 import type {
   AwarenessCursor,
   ParticipantSummary,
+  RoomPhase,
   RoomSummary,
 } from "@architect/contracts";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
@@ -15,9 +16,11 @@ import { MemberStrip } from "../workspace/MemberStrip";
 import { usePresence } from "../workspace/usePresence";
 import { createBoundedCursorPublisher } from "./cursorPublisher";
 import { RequirementsPanel } from "./RequirementsPanel";
+import { ReadinessVote } from "./ReadinessVote";
 import { createTldrawBinding } from "./tldrawBinding";
 
 type WhiteboardProps = {
+  onPhaseChange?: (phase: RoomPhase) => void;
   room: RoomSummary;
 };
 
@@ -26,7 +29,7 @@ type CanvasState =
   | { status: "ready" }
   | { status: "error"; message: string };
 
-export function Whiteboard({ room }: WhiteboardProps) {
+export function Whiteboard({ onPhaseChange, room }: WhiteboardProps) {
   const localParticipant = room.currentParticipantId
     ? room.participants.find(
         (participant) => participant.id === room.currentParticipantId,
@@ -42,11 +45,18 @@ export function Whiteboard({ room }: WhiteboardProps) {
     );
   }
 
-  return <ConnectedWhiteboard localParticipant={localParticipant} room={room} />;
+  return (
+    <ConnectedWhiteboard
+      localParticipant={localParticipant}
+      onPhaseChange={onPhaseChange}
+      room={room}
+    />
+  );
 }
 
 function ConnectedWhiteboard({
   localParticipant,
+  onPhaseChange,
   room,
 }: WhiteboardProps & { localParticipant: ParticipantSummary }) {
   const [canvasState, setCanvasState] = useState<CanvasState>({
@@ -236,7 +246,16 @@ function ConnectedWhiteboard({
           />
         </div>
       </section>
-      <RequirementsPanel connectionError={readyError || null} doc={doc} />
+      <aside className="sketch-sidebar" aria-label="Sketch decisions">
+        <ReadinessVote
+          doc={doc}
+          onPhaseChange={onPhaseChange}
+          participantId={localParticipant.id}
+          phase={room.phase}
+          roomId={room.id}
+        />
+        <RequirementsPanel connectionError={readyError || null} doc={doc} />
+      </aside>
     </div>
   );
 }

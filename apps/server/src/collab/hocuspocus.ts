@@ -7,9 +7,19 @@ import * as decoding from "lib0/decoding";
 import type { IncomingHttpHeaders } from "node:http";
 import { isDeepStrictEqual } from "node:util";
 import * as Y from "yjs";
+import {
+  messageYjsSyncStep1,
+  messageYjsSyncStep2,
+  messageYjsUpdate,
+} from "y-protocols/sync";
 import { parseCookies, participantCookieName } from "../auth/cookies.js";
 import { verifyParticipant } from "../auth/participant.js";
 import type { AwarenessRegistry } from "./awareness.registry.js";
+import {
+  createActiveDocumentRegistry,
+  type ActiveDocumentRegistry,
+} from "./active-document.registry.js";
+import { assertClientDocumentUpdateAllowed } from "./protected-document.js";
 import {
   createSnapshotService,
   type SnapshotPersistenceFailure,
@@ -102,6 +112,7 @@ type CollaborationEnvironment = {
 type CreateHocuspocusServerOptions = {
   awarenessRegistry: AwarenessRegistry;
   debounceMs?: number;
+  documents?: ActiveDocumentRegistry;
   env: CollaborationEnvironment;
   maxDebounceMs?: number;
   onPersistenceError?: (failure: SnapshotPersistenceFailure) => void;
@@ -167,6 +178,25 @@ function inboundMessageType(update: Uint8Array): MessageType {
   return decoding.readVarUint(decoder) as MessageType;
 }
 
+function inboundSyncUpdate(update: Uint8Array): Uint8Array | undefined {
+  const decoder = decoding.createDecoder(update);
+  decoding.readVarString(decoder);
+  const messageType = decoding.readVarUint(decoder) as MessageType;
+  if (messageType !== MessageType.Sync && messageType !== MessageType.SyncReply) {
+    return undefined;
+  }
+  const syncType = decoding.readVarUint(decoder);
+  const payload = decoding.readVarUint8Array(decoder);
+  if (decoding.hasContent(decoder)) {
+    throw new Error("Malformed sync message");
+  }
+  if (syncType === messageYjsSyncStep1) return undefined;
+  if (syncType === messageYjsSyncStep2 || syncType === messageYjsUpdate) {
+    return payload;
+  }
+  throw new Error("Malformed sync message");
+}
+
 function inboundAwarenessEntries(update: Uint8Array): Array<{
   clientId: number;
   clock: number;
@@ -193,6 +223,7 @@ function inboundAwarenessEntries(update: Uint8Array): Array<{
 export function createHocuspocusServer({
   awarenessRegistry,
   debounceMs = 2_000,
+  documents: providedDocuments,
   env,
   maxDebounceMs = 10_000,
   onPersistenceError = () => {
@@ -202,24 +233,30 @@ export function createHocuspocusServer({
 }: CreateHocuspocusServerOptions) {
   const database = prisma as ParticipantDatabase & SnapshotDatabase;
   const repository = createYjsRepository(database);
+  const documents =
+    providedDocuments ??
+    createActiveDocumentRegistry({
+      loadRoomDocument: repository.loadRoomDocument,
+    });
+  const ownsDocuments = providedDocuments === undefined;
   const snapshots = createSnapshotService({
     onPersistenceError,
     persistRoomSnapshot: repository.persistRoomSnapshot,
   });
   const awarenessOwners = new WeakMap<object, Map<number, string>>();
-  const activeDocuments = new Map<
-    string,
-    onAwarenessUpdatePayload["document"]
-  >();
+  const deactivateDocuments = new Map<string, () => Promise<void>>();
   const unsubscribeAwareness = awarenessRegistry.subscribe((roomId) => {
-    activeDocuments.get(roomId)?.broadcastStateless(
-      JSON.stringify({
-        type: "architect/presence",
-        version: 1,
-        roomId,
-        profiles: awarenessRegistry.list(roomId),
-      }),
-    );
+    const document = documents.active(roomId);
+    if (document && "broadcastStateless" in document) {
+      (document as onAwarenessUpdatePayload["document"]).broadcastStateless(
+        JSON.stringify({
+          type: "architect/presence",
+          version: 1,
+          roomId,
+          profiles: awarenessRegistry.list(roomId),
+        }),
+      );
+    }
   });
   let stopping = false;
   let destroyPromise: Promise<void> | undefined;
@@ -255,12 +292,32 @@ export function createHocuspocusServer({
       Y.applyUpdate(document, Y.encodeStateAsUpdate(restored));
       restored.destroy();
     },
-    async afterLoadDocument({ document, documentName }) {
+    async afterLoadDocument({ context, document, documentName }) {
+      const authenticated = context as AuthenticationContext;
+      const currentParticipant = await database.participant.findFirst({
+        where: {
+          id: authenticated.participant.participantId,
+          roomId: documentName,
+        },
+        select: {
+          id: true,
+          name: true,
+          color: true,
+          room: { select: { phase: true } },
+        },
+      });
+      if (!currentParticipant) throw new Error("Unauthorized");
+      const deactivate = await documents.activate(documentName, document);
+      deactivateDocuments.set(documentName, deactivate);
+      document.getMap("meta").set("phase", currentParticipant.room.phase);
       snapshots.track(documentName, document);
-      activeDocuments.set(documentName, document);
     },
     async beforeHandleMessage({ document, documentName, socketId, update }) {
       awarenessRegistry.heartbeat(documentName, socketId);
+      const documentUpdate = inboundSyncUpdate(update);
+      if (documentUpdate) {
+        assertClientDocumentUpdateAllowed(document, documentUpdate);
+      }
       const messageType = inboundMessageType(update);
       if (
         messageType === MessageType.Stateless ||
@@ -310,7 +367,9 @@ export function createHocuspocusServer({
       awarenessRegistry.disconnect(documentName, socketId);
     },
     async afterUnloadDocument({ documentName }) {
-      activeDocuments.delete(documentName);
+      const deactivate = deactivateDocuments.get(documentName);
+      deactivateDocuments.delete(documentName);
+      await deactivate?.();
       if (!stopping) snapshots.release(documentName);
     },
   });
@@ -365,10 +424,31 @@ export function createHocuspocusServer({
           await snapshots.shutdown();
         } catch (error) {
           failures.push(error);
-        } finally {
+        }
+        try {
           unsubscribeAwareness();
-          activeDocuments.clear();
+        } catch (error) {
+          failures.push(error);
+        }
+        try {
+          await Promise.all(
+            [...deactivateDocuments.values()].map((deactivate) => deactivate()),
+          );
+        } catch (error) {
+          failures.push(error);
+        }
+        deactivateDocuments.clear();
+        if (ownsDocuments) {
+          try {
+            await documents.destroy();
+          } catch (error) {
+            failures.push(error);
+          }
+        }
+        try {
           awarenessRegistry.destroy();
+        } catch (error) {
+          failures.push(error);
         }
         if (failures.length === 1) throw failures[0];
         if (failures.length > 1) {

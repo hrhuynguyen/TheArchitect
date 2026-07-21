@@ -143,7 +143,16 @@ export default function RoomPage({ params }: RoomPageProps) {
     >
       {visiblePhase === "sketch" ? (
         <div className="workspace-sketch" id="sketch">
-          <Whiteboard room={room} />
+          <Whiteboard
+            onPhaseChange={(phase) => {
+              setState((current) =>
+                current.status === "ready" && current.room.id === room.id
+                  ? { status: "ready", room: { ...current.room, phase } }
+                  : current,
+              );
+            }}
+            room={room}
+          />
         </div>
       ) : (
         <div className="workspace-empty" id={visiblePhase}>

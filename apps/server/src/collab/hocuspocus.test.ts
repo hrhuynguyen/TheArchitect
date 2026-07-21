@@ -1,5 +1,10 @@
 import * as Y from "yjs";
-import { ServerPresenceSnapshotSchema } from "@architect/contracts";
+import {
+  READINESS_THRESHOLD,
+  SERVER_VOTES_MAP_KEY,
+  ServerPresenceSnapshotSchema,
+  type RoomPhase,
+} from "@architect/contracts";
 import { HocuspocusProvider } from "@hocuspocus/provider";
 import * as encoding from "lib0/encoding";
 import WebSocket from "ws";
@@ -7,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { participantCookieName } from "../auth/cookies.js";
 import { signParticipant } from "../auth/participant.js";
 import { createAwarenessRegistry } from "./awareness.registry.js";
+import { createActiveDocumentRegistry } from "./active-document.registry.js";
 import {
   authenticateParticipant,
   createHocuspocusServer,
@@ -137,7 +143,9 @@ describe("transient awareness registry", () => {
       staleAfterMs: 1_000,
     });
     const listener = vi.fn();
+    const membershipListener = vi.fn();
     registry.subscribe(listener);
+    registry.subscribeMembership(membershipListener);
     registry.connect(roomId, "socket-a", {
       participantId,
       name: "Grace",
@@ -145,6 +153,7 @@ describe("transient awareness registry", () => {
       phase: "sketch",
     });
     expect(listener).toHaveBeenCalledTimes(1);
+    expect(membershipListener).toHaveBeenCalledTimes(1);
 
     now = 100;
     registry.heartbeat(roomId, "socket-a");
@@ -155,6 +164,7 @@ describe("transient awareness registry", () => {
 
     registry.updateClient(roomId, "socket-a", 101, { phase: "architect" });
     expect(listener).toHaveBeenCalledTimes(2);
+    expect(membershipListener).toHaveBeenCalledTimes(1);
     now = 200;
     registry.heartbeat(roomId, "socket-a");
     expect(listener).toHaveBeenCalledTimes(2);
@@ -162,8 +172,10 @@ describe("transient awareness registry", () => {
     now = 1_201;
     vi.advanceTimersByTime(100);
     expect(listener).toHaveBeenCalledTimes(3);
+    expect(membershipListener).toHaveBeenCalledTimes(2);
     registry.heartbeat(roomId, "socket-a");
     expect(listener).toHaveBeenCalledTimes(4);
+    expect(membershipListener).toHaveBeenCalledTimes(3);
     registry.heartbeat(roomId, "socket-a");
     expect(listener).toHaveBeenCalledTimes(4);
 
@@ -475,7 +487,16 @@ function createCollaborationDatabase() {
     payload: Uint8Array;
     reason: string;
   }> = [];
-  const participants = new Map([
+  const participants = new Map<
+    string,
+    {
+      id: string;
+      roomId: string;
+      name: string;
+      color: string;
+      room: { phase: RoomPhase };
+    }
+  >([
     [
       participantId,
       {
@@ -625,6 +646,225 @@ async function eventually(
 }
 
 describe("Hocuspocus WebSocket integration", () => {
+  it("rejects mixed shape, vote, and phase forgery before peer relay", async () => {
+    const memory = createCollaborationDatabase();
+    const seeded = new Y.Doc();
+    const canonicalVote = {
+      tally: 1,
+      total: 2,
+      ratio: 0.5,
+      met: false,
+      threshold: READINESS_THRESHOLD,
+      voterIds: [participantId],
+    };
+    seeded.getMap(SERVER_VOTES_MAP_KEY).set("ready", canonicalVote);
+    memory.snapshots.push({
+      roomId,
+      version: 1,
+      payload: Y.encodeStateAsUpdate(seeded),
+      reason: "seed",
+    });
+    seeded.destroy();
+    const collaboration = createHocuspocusServer({
+      awarenessRegistry: createAwarenessRegistry(),
+      env: { COOKIE_SIGNING_SECRET: secret, WS_PORT: 0 },
+      prisma: memory.database,
+    });
+    const listening = await collaboration.listen({ host: "127.0.0.1", port: 0 });
+    const attacker = connectProvider({
+      cookie: cookieHeader(roomId),
+      url: listening.webSocketUrl,
+    });
+    const peerDocument = new Y.Doc();
+    const peer = connectProvider({
+      cookie: cookieHeader(roomId, { roomId, participantId: participantBId }),
+      document: peerDocument,
+      url: listening.webSocketUrl,
+    });
+
+    try {
+      await Promise.all([attacker.synced, peer.synced]);
+      attacker.provider.document.transact(() => {
+        attacker.provider.document
+          .getMap("drawing")
+          .set("shape-forged-batch", { type: "database" });
+        attacker.provider.document.getMap(SERVER_VOTES_MAP_KEY).set("ready", {
+          tally: 2,
+          total: 2,
+          ratio: 1,
+          met: true,
+          threshold: READINESS_THRESHOLD,
+          voterIds: [participantId, participantBId],
+        });
+        attacker.provider.document.getMap("meta").set("phase", "architect");
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(peerDocument.getMap("drawing").has("shape-forged-batch")).toBe(false);
+      expect(peerDocument.getMap(SERVER_VOTES_MAP_KEY).get("ready")).toEqual(
+        canonicalVote,
+      );
+      expect(peerDocument.getMap("meta").get("phase")).toBe("sketch");
+    } finally {
+      attacker.provider.destroy();
+      peer.provider.destroy();
+      peerDocument.destroy();
+      await collaboration.destroy();
+    }
+  });
+
+  it("rejects a sync update with trailing protocol data before applying it", async () => {
+    const memory = createCollaborationDatabase();
+    const collaboration = createHocuspocusServer({
+      awarenessRegistry: createAwarenessRegistry(),
+      env: { COOKIE_SIGNING_SECRET: secret, WS_PORT: 0 },
+      prisma: memory.database,
+    });
+    const listening = await collaboration.listen({ host: "127.0.0.1", port: 0 });
+    const attacker = connectProvider({
+      cookie: cookieHeader(roomId),
+      url: listening.webSocketUrl,
+    });
+    const peerDocument = new Y.Doc();
+    const peer = connectProvider({
+      cookie: cookieHeader(roomId, { roomId, participantId: participantBId }),
+      document: peerDocument,
+      url: listening.webSocketUrl,
+    });
+
+    try {
+      await Promise.all([attacker.synced, peer.synced]);
+      const candidate = new Y.Doc();
+      Y.applyUpdate(
+        candidate,
+        Y.encodeStateAsUpdate(attacker.provider.document),
+      );
+      const before = Y.encodeStateVector(candidate);
+      candidate.getMap("drawing").set("shape-trailing", { type: "queue" });
+      const update = Y.encodeStateAsUpdate(candidate, before);
+      const frame = encoding.createEncoder();
+      encoding.writeVarString(frame, roomId);
+      encoding.writeVarUint(frame, 0);
+      encoding.writeVarUint(frame, 2);
+      encoding.writeVarUint8Array(frame, update);
+      encoding.writeVarUint(frame, 99);
+      attacker.provider.configuration.websocketProvider.send(
+        encoding.toUint8Array(frame),
+      );
+
+      await attacker.disconnected;
+      expect(peerDocument.getMap("drawing").has("shape-trailing")).toBe(false);
+      candidate.destroy();
+    } finally {
+      attacker.provider.destroy();
+      peer.provider.destroy();
+      peerDocument.destroy();
+      await collaboration.destroy();
+    }
+  });
+
+  it("hands the live document to the shared bridge and restores durable Room phase", async () => {
+    const memory = createCollaborationDatabase();
+    memory.participants.get(participantId)!.room.phase = "reconstructing";
+    const seeded = new Y.Doc();
+    seeded.getMap("meta").set("phase", "sketch");
+    seeded.getMap("shared").set("message", "recovered");
+    memory.snapshots.push({
+      roomId,
+      version: 1,
+      payload: Y.encodeStateAsUpdate(seeded),
+      reason: "seed",
+    });
+    seeded.destroy();
+    const documents = createActiveDocumentRegistry({
+      async loadRoomDocument(id) {
+        const document = new Y.Doc();
+        const latest = memory.snapshots
+          .filter((snapshot) => snapshot.roomId === id)
+          .sort((left, right) => right.version - left.version)[0];
+        if (latest) Y.applyUpdate(document, latest.payload);
+        return document;
+      },
+    });
+    await documents.withDocument(roomId, async (fallback) => {
+      fallback.getMap("meta").set("phase", "sketch");
+      fallback.getMap("shared").set("handoff", "queued-before-activation");
+    });
+    const collaboration = createHocuspocusServer({
+      awarenessRegistry: createAwarenessRegistry(),
+      documents,
+      env: { COOKIE_SIGNING_SECRET: secret, WS_PORT: 0 },
+      prisma: memory.database,
+    });
+    const listening = await collaboration.listen({ host: "127.0.0.1", port: 0 });
+    const restored = new Y.Doc();
+    const client = connectProvider({
+      cookie: cookieHeader(roomId),
+      document: restored,
+      url: listening.webSocketUrl,
+    });
+
+    try {
+      await client.synced;
+      expect(restored.getMap("shared").get("message")).toBe("recovered");
+      expect(restored.getMap("shared").get("handoff")).toBe(
+        "queued-before-activation",
+      );
+      expect(restored.getMap("meta").get("phase")).toBe("reconstructing");
+      expect(documents.active(roomId)).not.toBeNull();
+
+      client.provider.destroy();
+      await eventually(() => expect(documents.active(roomId)).toBeNull());
+      await collaboration.destroy();
+      await collaboration.destroy();
+      await documents.destroy();
+      await documents.destroy();
+    } finally {
+      client.provider.destroy();
+      restored.destroy();
+      await collaboration.destroy();
+      await documents.destroy();
+    }
+  });
+
+  it("does not activate a document when the post-auth membership lookup fails", async () => {
+    const memory = createCollaborationDatabase();
+    const findParticipant = memory.database.participant.findFirst.bind(
+      memory.database.participant,
+    );
+    let reads = 0;
+    memory.database.participant.findFirst = async (input) => {
+      reads += 1;
+      return reads === 1 ? findParticipant(input) : null;
+    };
+    const documents = createActiveDocumentRegistry({
+      async loadRoomDocument() {
+        return new Y.Doc();
+      },
+    });
+    const activate = vi.spyOn(documents, "activate");
+    const collaboration = createHocuspocusServer({
+      awarenessRegistry: createAwarenessRegistry(),
+      documents,
+      env: { COOKIE_SIGNING_SECRET: secret, WS_PORT: 0 },
+      prisma: memory.database,
+    });
+    const listening = await collaboration.listen({ host: "127.0.0.1", port: 0 });
+    const client = connectProvider({
+      cookie: cookieHeader(roomId),
+      url: listening.webSocketUrl,
+    });
+    try {
+      await eventually(() => expect(reads).toBeGreaterThanOrEqual(2));
+      expect(activate).not.toHaveBeenCalled();
+      expect(documents.active(roomId)).toBeNull();
+    } finally {
+      client.provider.destroy();
+      await collaboration.destroy();
+      await documents.destroy();
+    }
+  });
+
   it("binds awareness identity to its socket and broadcasts only server snapshots", async () => {
     const memory = createCollaborationDatabase();
     const registry = createAwarenessRegistry();
@@ -852,12 +1092,6 @@ describe("Hocuspocus WebSocket integration", () => {
       cursor: { x: 10, y: 20 },
       phase: "architect",
     });
-    first.provider.document.getMap("meta").set("phase", "architect");
-    await eventually(() => {
-      expect(
-        memory.snapshots.some(({ reason }) => reason === "phase_transition"),
-      ).toBe(true);
-    });
     first.provider.document.getMap("shared").set("message", "durable");
     await eventually(() => {
       expect(secondDocument.getMap("shared").get("message")).toBe("durable");
@@ -885,7 +1119,7 @@ describe("Hocuspocus WebSocket integration", () => {
     second.provider.destroy();
 
     expect(memory.snapshots.some(({ reason }) => reason === "phase_transition")).toBe(
-      true,
+      false,
     );
     expect(memory.snapshots.at(-1)?.reason).toBe("shutdown");
     const persistedDocument = new Y.Doc();

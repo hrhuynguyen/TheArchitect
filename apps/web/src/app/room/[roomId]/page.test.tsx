@@ -23,10 +23,19 @@ vi.mock("../../../features/rooms/api", async (importOriginal) => {
 });
 
 vi.mock("../../../features/sketch/Whiteboard", () => ({
-  Whiteboard: ({ room }: { room: typeof baseRoom }) => (
+  Whiteboard: ({
+    room,
+    onPhaseChange,
+  }: {
+    room: typeof baseRoom;
+    onPhaseChange?: (phase: "reconstructing") => void;
+  }) => (
     <section aria-label="Collaborative architecture sketch">
       <h1>Map the system together.</h1>
       <p>Live room {room.id}</p>
+      <button onClick={() => onPhaseChange?.("reconstructing")} type="button">
+        Confirm reconstructing
+      </button>
     </section>
   ),
 }));
@@ -101,6 +110,22 @@ describe("room route", () => {
       "href",
       "/start",
     );
+  });
+
+  it("moves to reconstructing only when the whiteboard reports server authority", async () => {
+    getRoom.mockResolvedValueOnce(baseRoom);
+    const user = userEvent.setup();
+    await renderRoomPage();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Confirm reconstructing" }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Shape the system into a buildable plan." }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("region", { name: "Collaborative architecture sketch" }),
+    ).not.toBeInTheDocument();
   });
 
   it("states that a solo room cannot accept collaborators", async () => {

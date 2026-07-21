@@ -33,14 +33,24 @@ export function createAwarenessRegistry(options: RegistryOptions = {}) {
   const rooms = new Map<string, Map<string, SocketPresence>>();
   const sockets = new Map<string, string>();
   const listeners = new Set<(roomId: string) => void>();
+  const membershipListeners = new Set<(roomId: string) => void>();
   let destroyed = false;
 
-  const notify = (roomId: string) => {
+  const notify = (roomId: string, membershipChanged = false) => {
     for (const listener of listeners) {
       try {
         listener(roomId);
       } catch {
         // Presence bookkeeping must survive a failed transport notification.
+      }
+    }
+    if (membershipChanged) {
+      for (const listener of membershipListeners) {
+        try {
+          listener(roomId);
+        } catch {
+          // Voting bookkeeping must survive a failed membership notification.
+        }
       }
     }
   };
@@ -64,7 +74,7 @@ export function createAwarenessRegistry(options: RegistryOptions = {}) {
           changed = true;
         }
       }
-      if (changed) notify(roomId);
+      if (changed) notify(roomId, true);
     }
   };
 
@@ -92,13 +102,13 @@ export function createAwarenessRegistry(options: RegistryOptions = {}) {
         visible: true,
       });
       sockets.set(socketId, roomId);
-      notify(roomId);
+      notify(roomId, true);
     },
 
     disconnect(roomId: string, socketId: string) {
       if (sockets.get(socketId) !== roomId) return;
       removeSocket(socketId);
-      notify(roomId);
+      notify(roomId, true);
     },
 
     heartbeat(roomId: string, socketId: string) {
@@ -108,7 +118,7 @@ export function createAwarenessRegistry(options: RegistryOptions = {}) {
       const wasVisible = socket.visible;
       socket.lastSeenAt = now();
       socket.visible = true;
-      if (!wasVisible) notify(roomId);
+      if (!wasVisible) notify(roomId, true);
     },
 
     updateClient(
@@ -122,6 +132,7 @@ export function createAwarenessRegistry(options: RegistryOptions = {}) {
       if (!socket) return;
 
       const timestamp = now();
+      const wasVisible = socket.visible;
       const previous = socket.clients.get(clientId);
       const phase = RoomPhaseSchema.safeParse(update.phase);
       const cursor = AwarenessCursorSchema.safeParse(update.cursor);
@@ -140,7 +151,7 @@ export function createAwarenessRegistry(options: RegistryOptions = {}) {
       });
       socket.lastSeenAt = timestamp;
       socket.visible = true;
-      notify(roomId);
+      notify(roomId, !wasVisible);
     },
 
     removeClient(roomId: string, socketId: string, clientId: number) {
@@ -201,6 +212,11 @@ export function createAwarenessRegistry(options: RegistryOptions = {}) {
       return () => listeners.delete(listener);
     },
 
+    subscribeMembership(listener: (roomId: string) => void) {
+      membershipListeners.add(listener);
+      return () => membershipListeners.delete(listener);
+    },
+
     destroy() {
       if (destroyed) return;
       destroyed = true;
@@ -208,6 +224,7 @@ export function createAwarenessRegistry(options: RegistryOptions = {}) {
       rooms.clear();
       sockets.clear();
       listeners.clear();
+      membershipListeners.clear();
     },
   };
 }

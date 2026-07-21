@@ -728,12 +728,103 @@ a {
   white-space: nowrap;
 }
 
-.requirements-panel {
+.sketch-sidebar {
   min-width: 0;
   overflow: auto;
   border-left: 1px solid var(--border);
   background: color-mix(in srgb, var(--rail) 42%, var(--panel));
+}
+
+.requirements-panel {
+  min-width: 0;
   padding: 1.25rem;
+}
+
+.readiness-vote {
+  display: grid;
+  gap: 1rem;
+  border-bottom: 1px solid var(--border);
+  padding: 1.25rem;
+}
+
+.readiness-vote__heading h2 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.45rem;
+  font-weight: 400;
+  letter-spacing: -0.025em;
+  line-height: 1.1;
+}
+
+.readiness-vote__heading > p:last-child {
+  margin: 0.65rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.readiness-vote__progress {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.readiness-vote__progress > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.75rem;
+}
+
+.readiness-vote__progress span {
+  color: var(--muted);
+}
+
+.readiness-vote progress {
+  width: 100%;
+  height: 0.55rem;
+  border: 0;
+  accent-color: var(--success);
+}
+
+.readiness-vote [role="alert"],
+.readiness-vote [role="status"] {
+  margin: 0;
+  font-size: 0.75rem;
+}
+
+.readiness-vote [role="alert"] {
+  color: var(--danger);
+}
+
+.readiness-vote__error {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.readiness-vote__button,
+.readiness-vote__error button {
+  min-height: 40px;
+  border: 1px solid var(--ink);
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--panel);
+  padding: 0.55rem 0.9rem;
+  font-size: 0.76rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.readiness-vote__button:disabled,
+.readiness-vote__error button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.readiness-vote__success {
+  border-radius: 10px;
+  background: var(--success-soft);
+  color: var(--success);
+  padding: 0.75rem;
+  font-weight: 700;
 }
 
 .requirements-panel__heading h2 {
@@ -903,7 +994,7 @@ a {
     height: min(65vh, 640px);
   }
 
-  .requirements-panel {
+  .sketch-sidebar {
     border-top: 1px solid var(--border);
     border-left: 0;
   }

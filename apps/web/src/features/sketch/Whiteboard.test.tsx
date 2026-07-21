@@ -113,6 +113,9 @@ describe("Whiteboard", () => {
     act(() => boundary.emit("synced", { state: true }));
     expect(await screen.findByTestId("tldraw-editor")).toBeVisible();
     expect(screen.getAllByText("Grace")).toHaveLength(2);
+    expect(
+      screen.getByRole("region", { name: "Team readiness" }),
+    ).toBeVisible();
     expect(mocks.createTldrawBinding).toHaveBeenCalledWith(
       expect.objectContaining({ doc, store: expect.anything() }),
     );
