@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --jsx react-jsx src/index.ts"
+    "typecheck": "tsc -p tsconfig.json"
   },
   "peerDependencies": {
     "react": "^19.2.7"

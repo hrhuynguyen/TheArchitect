@@ -8,6 +8,6 @@
   },
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 src/index.ts"
+    "typecheck": "tsc -p tsconfig.json"
   }
 }
