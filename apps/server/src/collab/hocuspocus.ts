@@ -1,10 +1,19 @@
-import { Server, type onAwarenessUpdatePayload } from "@hocuspocus/server";
+import {
+  MessageType,
+  Server,
+  type onAwarenessUpdatePayload,
+} from "@hocuspocus/server";
+import * as decoding from "lib0/decoding";
 import type { IncomingHttpHeaders } from "node:http";
+import { isDeepStrictEqual } from "node:util";
 import * as Y from "yjs";
 import { parseCookies, participantCookieName } from "../auth/cookies.js";
 import { verifyParticipant } from "../auth/participant.js";
 import type { AwarenessRegistry } from "./awareness.registry.js";
-import { createSnapshotService } from "./snapshot.service.js";
+import {
+  createSnapshotService,
+  type SnapshotPersistenceFailure,
+} from "./snapshot.service.js";
 import {
   createYjsRepository,
   type SnapshotDatabase,
@@ -95,7 +104,7 @@ type CreateHocuspocusServerOptions = {
   debounceMs?: number;
   env: CollaborationEnvironment;
   maxDebounceMs?: number;
-  onPersistenceError?: (error: unknown) => void;
+  onPersistenceError?: (failure: SnapshotPersistenceFailure) => void;
   prisma: unknown;
 };
 
@@ -103,29 +112,82 @@ type AuthenticationContext = Awaited<ReturnType<typeof authenticateParticipant>>
 
 function awarenessProfile(state: unknown): Record<string, unknown> | undefined {
   if (!state || typeof state !== "object") return undefined;
-  const profile = (state as { profile?: unknown }).profile;
+  const candidate = state as { presence?: unknown; profile?: unknown };
+  const profile = candidate.presence ?? candidate.profile;
   return profile && typeof profile === "object"
     ? (profile as Record<string, unknown>)
     : undefined;
 }
 
+function connectionOwner(
+  document: onAwarenessUpdatePayload["document"],
+  clientId: number,
+): string | undefined {
+  for (const { clients, connection } of document.connections.values()) {
+    if (clients.has(clientId)) return connection.socketId;
+  }
+  return undefined;
+}
+
 function updateAwarenessRegistry(
   awarenessRegistry: AwarenessRegistry,
+  owners: Map<number, string>,
   data: Pick<
     onAwarenessUpdatePayload,
-    "documentName" | "socketId" | "states"
+    "added" | "document" | "documentName" | "removed" | "states" | "updated"
   >,
 ): void {
-  awarenessRegistry.heartbeat(data.documentName, data.socketId);
-  for (const state of data.states) {
+  const states = new Map(data.states.map((state) => [state.clientId, state]));
+  for (const clientId of [...data.added, ...data.updated]) {
+    const socketId = connectionOwner(data.document, clientId) ?? owners.get(clientId);
+    if (!socketId) continue;
+    owners.set(clientId, socketId);
+    const state = states.get(clientId);
     const profile = awarenessProfile(state);
-    if (typeof profile?.participantId !== "string") continue;
-    awarenessRegistry.updateParticipant(
+    if (!profile) continue;
+    awarenessRegistry.updateClient(
       data.documentName,
-      profile.participantId,
+      socketId,
+      clientId,
       profile,
     );
   }
+  for (const clientId of data.removed) {
+    const socketId = owners.get(clientId);
+    if (socketId) {
+      awarenessRegistry.removeClient(data.documentName, socketId, clientId);
+    }
+    owners.delete(clientId);
+  }
+}
+
+function inboundMessageType(update: Uint8Array): MessageType {
+  const decoder = decoding.createDecoder(update);
+  decoding.readVarString(decoder);
+  return decoding.readVarUint(decoder) as MessageType;
+}
+
+function inboundAwarenessEntries(update: Uint8Array): Array<{
+  clientId: number;
+  clock: number;
+  state: unknown;
+}> {
+  const decoder = decoding.createDecoder(update);
+  decoding.readVarString(decoder);
+  if (decoding.readVarUint(decoder) !== MessageType.Awareness) return [];
+  const awarenessDecoder = decoding.createDecoder(
+    decoding.readVarUint8Array(decoder),
+  );
+  const count = decoding.readVarUint(awarenessDecoder);
+  const entries: Array<{ clientId: number; clock: number; state: unknown }> = [];
+  for (let index = 0; index < count; index += 1) {
+    entries.push({
+      clientId: decoding.readVarUint(awarenessDecoder),
+      clock: decoding.readVarUint(awarenessDecoder),
+      state: JSON.parse(decoding.readVarString(awarenessDecoder)),
+    });
+  }
+  return entries;
 }
 
 export function createHocuspocusServer({
@@ -141,21 +203,29 @@ export function createHocuspocusServer({
   const database = prisma as ParticipantDatabase & SnapshotDatabase;
   const repository = createYjsRepository(database);
   const snapshots = createSnapshotService({
+    onPersistenceError,
     persistRoomSnapshot: repository.persistRoomSnapshot,
+  });
+  const awarenessOwners = new WeakMap<object, Map<number, string>>();
+  const activeDocuments = new Map<
+    string,
+    onAwarenessUpdatePayload["document"]
+  >();
+  const unsubscribeAwareness = awarenessRegistry.subscribe((roomId) => {
+    activeDocuments.get(roomId)?.broadcastStateless(
+      JSON.stringify({
+        type: "architect/presence",
+        version: 1,
+        roomId,
+        profiles: awarenessRegistry.list(roomId),
+      }),
+    );
   });
   let stopping = false;
   let destroyPromise: Promise<void> | undefined;
   let listenPromise:
     | Promise<{ port: number; webSocketUrl: string }>
     | undefined;
-  const reportPersistenceError = (error: unknown) => {
-    try {
-      onPersistenceError(error);
-    } catch {
-      // Persistence remains dirty and retryable even if logging fails.
-    }
-  };
-
   const server = new Server({
     address: "0.0.0.0",
     debounce: debounceMs,
@@ -187,31 +257,60 @@ export function createHocuspocusServer({
     },
     async afterLoadDocument({ document, documentName }) {
       snapshots.track(documentName, document);
+      activeDocuments.set(documentName, document);
     },
-    async beforeHandleMessage({ documentName, socketId }) {
+    async beforeHandleMessage({ document, documentName, socketId, update }) {
       awarenessRegistry.heartbeat(documentName, socketId);
+      const messageType = inboundMessageType(update);
+      if (
+        messageType === MessageType.Stateless ||
+        messageType === MessageType.BroadcastStateless
+      ) {
+        throw new Error("Client stateless messages are not allowed");
+      }
+      if (messageType === MessageType.Awareness) {
+        const owners = awarenessOwners.get(document) ?? new Map<number, string>();
+        awarenessOwners.set(document, owners);
+        for (const { clientId, clock, state } of inboundAwarenessEntries(update)) {
+          const owner = owners.get(clientId) ?? connectionOwner(document, clientId);
+          if (owner && owner !== socketId) {
+            const currentClock = document.awareness.meta.get(clientId)?.clock;
+            const currentState = document.awareness.states.get(clientId);
+            const harmlessEcho =
+              currentClock !== undefined &&
+              clock <= currentClock &&
+              isDeepStrictEqual(state, currentState);
+            if (!harmlessEcho) {
+              throw new Error("Awareness client belongs to another connection");
+            }
+          }
+        }
+      }
     },
     async onChange({ document, documentName }) {
       try {
         await snapshots.changed(documentName, document);
-      } catch (error) {
-        reportPersistenceError(error);
+      } catch {
+        // The snapshot service reports the structured failure and retains dirtiness.
       }
     },
     async onStoreDocument({ document, documentName }) {
       try {
         await snapshots.store(documentName, document);
-      } catch (error) {
-        reportPersistenceError(error);
+      } catch {
+        // The snapshot service reports the structured failure and retains dirtiness.
       }
     },
     async onAwarenessUpdate(data) {
-      updateAwarenessRegistry(awarenessRegistry, data);
+      const owners = awarenessOwners.get(data.document) ?? new Map<number, string>();
+      awarenessOwners.set(data.document, owners);
+      updateAwarenessRegistry(awarenessRegistry, owners, data);
     },
     async onDisconnect({ documentName, socketId }) {
       awarenessRegistry.disconnect(documentName, socketId);
     },
     async afterUnloadDocument({ documentName }) {
+      activeDocuments.delete(documentName);
       if (!stopping) snapshots.release(documentName);
     },
   });
@@ -267,6 +366,8 @@ export function createHocuspocusServer({
         } catch (error) {
           failures.push(error);
         } finally {
+          unsubscribeAwareness();
+          activeDocuments.clear();
           awarenessRegistry.destroy();
         }
         if (failures.length === 1) throw failures[0];

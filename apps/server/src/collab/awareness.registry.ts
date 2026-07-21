@@ -1,8 +1,10 @@
 import {
   AwarenessCursorSchema,
   RoomPhaseSchema,
+  type AwarenessCursor,
   type AwarenessIdentity,
   type AwarenessProfile,
+  type RoomPhase,
 } from "@architect/contracts";
 
 type RegistryOptions = {
@@ -11,43 +13,58 @@ type RegistryOptions = {
   staleAfterMs?: number;
 };
 
-type RegistryEntry = {
-  profile: AwarenessProfile;
-  sockets: Set<string>;
+type ClientPresence = {
+  cursor?: AwarenessCursor;
+  lastSeenAt: number;
+  phase: RoomPhase;
+};
+
+type SocketPresence = {
+  clients: Map<number, ClientPresence>;
+  identity: AwarenessIdentity;
+  lastSeenAt: number;
+  visible: boolean;
 };
 
 export function createAwarenessRegistry(options: RegistryOptions = {}) {
   const cleanupIntervalMs = options.cleanupIntervalMs ?? 15_000;
   const now = options.now ?? Date.now;
   const staleAfterMs = options.staleAfterMs ?? 45_000;
-  const rooms = new Map<string, Map<string, RegistryEntry>>();
-  const sockets = new Map<
-    string,
-    { participantId: string; roomId: string }
-  >();
+  const rooms = new Map<string, Map<string, SocketPresence>>();
+  const sockets = new Map<string, string>();
+  const listeners = new Set<(roomId: string) => void>();
   let destroyed = false;
 
+  const notify = (roomId: string) => {
+    for (const listener of listeners) {
+      try {
+        listener(roomId);
+      } catch {
+        // Presence bookkeeping must survive a failed transport notification.
+      }
+    }
+  };
+
   const removeSocket = (socketId: string) => {
-    const owner = sockets.get(socketId);
-    if (!owner) return;
+    const roomId = sockets.get(socketId);
+    if (!roomId) return;
     sockets.delete(socketId);
-    const room = rooms.get(owner.roomId);
-    const entry = room?.get(owner.participantId);
-    entry?.sockets.delete(socketId);
-    if (entry?.sockets.size === 0) room?.delete(owner.participantId);
-    if (room?.size === 0) rooms.delete(owner.roomId);
+    const room = rooms.get(roomId);
+    room?.delete(socketId);
+    if (room?.size === 0) rooms.delete(roomId);
   };
 
   const cleanup = () => {
     const cutoff = now() - staleAfterMs;
     for (const [roomId, room] of rooms) {
-      for (const [participantId, entry] of room) {
-        if (Date.parse(entry.profile.lastSeenAt) <= cutoff) {
-          for (const socketId of entry.sockets) sockets.delete(socketId);
-          room.delete(participantId);
+      let changed = false;
+      for (const socket of room.values()) {
+        if (socket.visible && socket.lastSeenAt <= cutoff) {
+          socket.visible = false;
+          changed = true;
         }
       }
-      if (room.size === 0) rooms.delete(roomId);
+      if (changed) notify(roomId);
     }
   };
 
@@ -63,70 +80,124 @@ export function createAwarenessRegistry(options: RegistryOptions = {}) {
         room = new Map();
         rooms.set(roomId, room);
       }
-      let entry = room.get(identity.participantId);
-      if (!entry) {
-        entry = {
-          profile: {
-            ...identity,
-            lastSeenAt: new Date(now()).toISOString(),
-          },
-          sockets: new Set(),
-        };
-        room.set(identity.participantId, entry);
-      } else {
-        entry.profile = {
-          ...entry.profile,
+      room.set(socketId, {
+        clients: new Map(),
+        identity: {
+          participantId: identity.participantId,
           name: identity.name,
           color: identity.color,
           phase: identity.phase,
-          lastSeenAt: new Date(now()).toISOString(),
-        };
-      }
-      entry.sockets.add(socketId);
-      sockets.set(socketId, { roomId, participantId: identity.participantId });
+        },
+        lastSeenAt: now(),
+        visible: true,
+      });
+      sockets.set(socketId, roomId);
+      notify(roomId);
     },
 
     disconnect(roomId: string, socketId: string) {
-      if (sockets.get(socketId)?.roomId !== roomId) return;
+      if (sockets.get(socketId) !== roomId) return;
       removeSocket(socketId);
+      notify(roomId);
     },
 
     heartbeat(roomId: string, socketId: string) {
-      const owner = sockets.get(socketId);
-      if (!owner || owner.roomId !== roomId) return;
-      const entry = rooms.get(roomId)?.get(owner.participantId);
-      if (entry) entry.profile.lastSeenAt = new Date(now()).toISOString();
+      if (sockets.get(socketId) !== roomId) return;
+      const socket = rooms.get(roomId)?.get(socketId);
+      if (!socket) return;
+      socket.lastSeenAt = now();
+      socket.visible = true;
+      notify(roomId);
     },
 
-    updateParticipant(
+    updateClient(
       roomId: string,
-      participantId: string,
+      socketId: string,
+      clientId: number,
       update: Record<string, unknown>,
     ) {
-      const entry = rooms.get(roomId)?.get(participantId);
-      if (!entry) return;
+      if (sockets.get(socketId) !== roomId) return;
+      const socket = rooms.get(roomId)?.get(socketId);
+      if (!socket) return;
 
-      if (update.cursor === null) delete entry.profile.cursor;
-      else {
-        const cursor = AwarenessCursorSchema.safeParse(update.cursor);
-        if (cursor.success) entry.profile.cursor = cursor.data;
-      }
+      const timestamp = now();
+      const previous = socket.clients.get(clientId);
       const phase = RoomPhaseSchema.safeParse(update.phase);
-      if (phase.success) entry.profile.phase = phase.data;
-      entry.profile.lastSeenAt = new Date(now()).toISOString();
+      const cursor = AwarenessCursorSchema.safeParse(update.cursor);
+      socket.clients.set(clientId, {
+        ...(update.cursor === null
+          ? {}
+          : cursor.success
+            ? { cursor: cursor.data }
+            : previous?.cursor
+              ? { cursor: previous.cursor }
+              : {}),
+        phase: phase.success
+          ? phase.data
+          : (previous?.phase ?? socket.identity.phase),
+        lastSeenAt: timestamp,
+      });
+      socket.lastSeenAt = timestamp;
+      socket.visible = true;
+      notify(roomId);
+    },
+
+    removeClient(roomId: string, socketId: string, clientId: number) {
+      if (sockets.get(socketId) !== roomId) return;
+      if (rooms.get(roomId)?.get(socketId)?.clients.delete(clientId)) {
+        notify(roomId);
+      }
     },
 
     list(roomId: string): AwarenessProfile[] {
-      return [...(rooms.get(roomId)?.values() ?? [])]
-        .map((entry) => ({
-          ...entry.profile,
-          ...(entry.profile.cursor
-            ? { cursor: { ...entry.profile.cursor } }
-            : {}),
+      const participants = new Map<
+        string,
+        {
+          identity: AwarenessIdentity;
+          identitySeenAt: number;
+          lastSeenAt: number;
+          presence?: ClientPresence;
+        }
+      >();
+
+      for (const socket of rooms.get(roomId)?.values() ?? []) {
+        if (!socket.visible) continue;
+        const existing = participants.get(socket.identity.participantId);
+        const entry = existing ?? {
+          identity: socket.identity,
+          identitySeenAt: socket.lastSeenAt,
+          lastSeenAt: socket.lastSeenAt,
+        };
+        if (socket.lastSeenAt >= entry.identitySeenAt) {
+          entry.identity = socket.identity;
+          entry.identitySeenAt = socket.lastSeenAt;
+        }
+        entry.lastSeenAt = Math.max(entry.lastSeenAt, socket.lastSeenAt);
+        for (const presence of socket.clients.values()) {
+          if (!entry.presence || presence.lastSeenAt >= entry.presence.lastSeenAt) {
+            entry.presence = presence;
+          }
+        }
+        participants.set(socket.identity.participantId, entry);
+      }
+
+      return [...participants.values()]
+        .map(({ identity, lastSeenAt, presence }) => ({
+          participantId: identity.participantId,
+          name: identity.name,
+          color: identity.color,
+          ...(presence?.cursor ? { cursor: { ...presence.cursor } } : {}),
+          phase: presence?.phase ?? identity.phase,
+          lastSeenAt: new Date(lastSeenAt).toISOString(),
         }))
         .sort((left, right) =>
           left.participantId.localeCompare(right.participantId),
         );
+    },
+
+    subscribe(listener: (roomId: string) => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
     },
 
     destroy() {
@@ -135,6 +206,7 @@ export function createAwarenessRegistry(options: RegistryOptions = {}) {
       clearInterval(cleanupTimer);
       rooms.clear();
       sockets.clear();
+      listeners.clear();
     },
   };
 }

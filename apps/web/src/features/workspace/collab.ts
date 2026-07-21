@@ -63,13 +63,20 @@ export function createRoomCollab({
   webSocketUrl,
 }: CreateRoomCollabOptions) {
   if (!roomId) throw new Error("A room ID is required for collaboration");
+  if (webSocketUrl !== undefined && !webSocketUrl.trim()) {
+    throw new Error("Invalid public WebSocket URL");
+  }
+  const resolvedWebSocketUrl =
+    webSocketUrl === undefined
+      ? resolveCollaborationUrl()
+      : resolveCollaborationUrl({ configuredUrl: webSocketUrl });
   const doc = new Y.Doc();
   let provider: HocuspocusProvider;
   try {
     provider = new HocuspocusProvider({
       document: doc,
       name: roomId,
-      url: webSocketUrl ?? resolveCollaborationUrl(),
+      url: resolvedWebSocketUrl,
     });
   } catch (error) {
     doc.destroy();

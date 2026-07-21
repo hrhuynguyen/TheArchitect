@@ -162,3 +162,64 @@ The test creates and cleans its own room and snapshots, exercises four concurren
 - Hocuspocus v3 awareness callbacks do not reliably expose the sending connection as an origin. Membership and name/color remain server-authoritative, while cursor/phase are treated as transient, non-authorization state and accepted only for participant IDs already in the authenticated room registry.
 - The optional real PostgreSQL test was added but not executed in this environment because `YJS_TEST_DATABASE_URL` was not provided.
 - `npm audit --omit=dev` reports two moderate findings under Next's bundled PostCSS. The path is unrelated to the added Hocuspocus/Yjs dependencies, and npm's proposed force fix would downgrade Next to 9.3.3, so no unsafe forced dependency change was made.
+
+---
+
+## Review fixes
+
+Review-fix base commit: `8b18cd8`
+
+The follow-up closes the awareness ownership, persistence traceability, stale recovery, and client validation findings. This section supersedes the earlier awareness limitation and bare-error reporting notes above.
+
+### Sender-bound presence and trusted rendering
+
+- Awareness client IDs are resolved through Hocuspocus `Document.connections` and retained in adapter ownership state for removal events.
+- Inbound awareness frames may echo another connection's state only when the state is deeply identical and its clock does not advance; a foreign mutation closes the sender before Hocuspocus applies or relays it.
+- Inbound client `Stateless` and `BroadcastStateless` protocol messages are rejected before handling, preventing a client from impersonating the server snapshot channel.
+- Registry identity, name, and color come only from the authenticated database participant. Client awareness contributes only validated cursor and phase for the owning socket/client ID.
+- Registry changes produce strict version-1 `architect/presence` snapshots through server-authored `Document.broadcastStateless` messages.
+- The web hook publishes only `{cursor, phase}` and renders only validated, same-room server snapshots; raw awareness identity and malformed, cross-room, or wrong-version stateless payloads are ignored.
+- A real two-provider test covers identity impersonation, a raw type-6 relay attempt, and a higher-clock awareness mutation targeting another socket's client ID.
+
+### Recovery and persistence observability
+
+- Stale cleanup hides socket presence but retains authenticated ownership. A later heartbeat restores the same still-open socket without reconnecting; an explicit disconnect removes it permanently.
+- Multiple sockets for one participant retain independent awareness clients and fall back to the remaining socket when one client disappears.
+- Every failed phase-transition, debounced, or shutdown flush reports exactly one `{roomId, reason, revision, error}` event at the snapshot-service boundary.
+- A throwing observer cannot replace the database error or clear dirtiness; a later flush retries the retained revision.
+- Production logging records the cause, room, reason, and revision as structured Fastify log fields without document bytes or credentials.
+
+### Client boundary hardening
+
+- Direct `webSocketUrl` input, including empty, malformed, non-WebSocket, and credential-bearing URLs, is validated before allocating a Y.Doc or provider.
+- Local identity uses the strict runtime contract. Heartbeats must be finite and between 250 ms and 60 seconds, and the injected clock must produce a valid ISO date before effects or timers are installed.
+
+### Follow-up RED → GREEN evidence
+
+- Registry RED: three expected failures for the missing socket/client update API and irreversible stale deletion. GREEN: 4 focused registry tests passed.
+- Server protocol RED: spoofed ownership remained unbound and a raw broadcast-stateless sender stayed connected. GREEN: authenticated spoof/snapshot and pre-relay rejection tests passed; the foreign-client mutation regression also passed.
+- Persistence RED: all three failure-reason tests observed zero callback events. GREEN: phase, debounce, and shutdown each emitted the exact structured event once.
+- Client RED: 12 focused failures exposed direct URL bypass, raw awareness rendering, and absent runtime validation. GREEN: 18 focused tests passed, followed by an empty-URL RED/GREEN case.
+
+### Final follow-up verification
+
+Fresh commands:
+
+```text
+npm test
+npm run typecheck
+npm run build
+git diff --check
+```
+
+Results:
+
+- server: 96 passed / 3 opt-in skipped;
+- web: 62 passed;
+- contracts: 8 passed;
+- total: 166 passed / 3 opt-in skipped;
+- server, web, contracts, infra, and UI typechecks passed;
+- server TypeScript build and Next 16 production build passed;
+- `git diff --check` passed.
+
+The optional PostgreSQL adapter test remains skipped because `YJS_TEST_DATABASE_URL` was not provided. No Task 6 UI was added.

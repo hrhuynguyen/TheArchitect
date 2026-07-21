@@ -1,79 +1,103 @@
 "use client";
 
 import {
-  AwarenessProfileSchema,
+  AwarenessIdentitySchema,
+  ServerPresenceSnapshotSchema,
   type AwarenessIdentity,
   type AwarenessProfile,
 } from "@architect/contracts";
+import type { HocuspocusProvider } from "@hocuspocus/provider";
 import { useEffect, useRef, useState } from "react";
-import type { Awareness } from "y-protocols/awareness";
 
 type UsePresenceOptions = {
-  awareness: Awareness | null;
   heartbeatMs?: number;
   now?: () => number;
   profile: AwarenessIdentity;
+  provider: HocuspocusProvider | null;
 };
 
-function profilesFromAwareness(awareness: Awareness): AwarenessProfile[] {
-  return [...awareness.getStates().values()]
-    .flatMap((state) => {
-      const parsed = AwarenessProfileSchema.safeParse(state.profile);
-      return parsed.success ? [parsed.data] : [];
-    })
-    .sort((left, right) =>
-      left.participantId.localeCompare(right.participantId),
-    );
+function validateClock(now: () => number): void {
+  const timestamp = now();
+  if (!Number.isFinite(timestamp)) throw new Error("Invalid presence clock");
+  try {
+    new Date(timestamp).toISOString();
+  } catch {
+    throw new Error("Invalid presence clock");
+  }
 }
 
 export function usePresence({
-  awareness,
   heartbeatMs = 15_000,
   now = Date.now,
   profile,
+  provider,
 }: UsePresenceOptions): AwarenessProfile[] {
+  const identity = AwarenessIdentitySchema.safeParse(profile);
+  if (!identity.success) throw new Error("Invalid awareness identity");
+  if (
+    !Number.isFinite(heartbeatMs) ||
+    heartbeatMs < 250 ||
+    heartbeatMs > 60_000
+  ) {
+    throw new Error("Invalid presence heartbeat interval");
+  }
+  validateClock(now);
+
   const [profiles, setProfiles] = useState<AwarenessProfile[]>([]);
   const nowRef = useRef(now);
   nowRef.current = now;
-  const { participantId, name, color, cursor, phase } = profile;
+  const { cursor, phase } = identity.data;
 
   useEffect(() => {
-    if (!awareness) {
+    const awareness = provider?.awareness;
+    if (!provider || !awareness) {
       setProfiles([]);
       return;
     }
+
     const publish = () => {
-      awareness.setLocalStateField("profile", {
-        participantId,
-        name,
-        color,
+      try {
+        validateClock(nowRef.current);
+      } catch {
+        return;
+      }
+      awareness.setLocalStateField("presence", {
         ...(cursor ? { cursor } : {}),
         phase,
-        lastSeenAt: new Date(nowRef.current()).toISOString(),
       });
     };
-    const update = () => setProfiles(profilesFromAwareness(awareness));
+    const receiveSnapshot = ({ payload }: { payload: string }) => {
+      let candidate: unknown;
+      try {
+        candidate = JSON.parse(payload);
+      } catch {
+        return;
+      }
+      const snapshot = ServerPresenceSnapshotSchema.safeParse(candidate);
+      if (
+        !snapshot.success ||
+        snapshot.data.roomId !== provider.configuration.name
+      ) {
+        return;
+      }
+      setProfiles(
+        [...snapshot.data.profiles].sort((left, right) =>
+          left.participantId.localeCompare(right.participantId),
+        ),
+      );
+    };
 
-    awareness.on("change", update);
+    setProfiles([]);
+    provider.on("stateless", receiveSnapshot);
     publish();
-    update();
     const heartbeat = setInterval(publish, heartbeatMs);
 
     return () => {
       clearInterval(heartbeat);
-      awareness.off("change", update);
+      provider.off("stateless", receiveSnapshot);
       awareness.setLocalState(null);
     };
-  }, [
-    awareness,
-    color,
-    cursor?.x,
-    cursor?.y,
-    heartbeatMs,
-    name,
-    participantId,
-    phase,
-  ]);
+  }, [provider, cursor?.x, cursor?.y, heartbeatMs, phase]);
 
   return profiles;
 }

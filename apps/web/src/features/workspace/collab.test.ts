@@ -52,6 +52,18 @@ describe("resolveCollaborationUrl", () => {
 });
 
 describe("createRoomCollab", () => {
+  it.each([
+    "https://collab.example.com/socket",
+    "wss://user:secret@collab.example.com/socket",
+    "not a URL",
+    "",
+  ])("rejects an invalid direct WebSocket URL before creating a provider: %s", (webSocketUrl) => {
+    expect(() =>
+      createRoomCollab({ roomId: "room-a", webSocketUrl }),
+    ).toThrow("Invalid public WebSocket URL");
+    expect(HocuspocusProvider).not.toHaveBeenCalled();
+  });
+
   it("uses the exact room name in protocol data and does not put it or secrets in the URL", () => {
     const roomId = "room/a?token=not-a-url-secret";
     const collaboration = createRoomCollab({

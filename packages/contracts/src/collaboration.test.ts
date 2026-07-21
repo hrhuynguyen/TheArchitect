@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { AwarenessProfileSchema } from "./collaboration.js";
+import {
+  AwarenessIdentitySchema,
+  AwarenessProfileSchema,
+  ServerPresenceSnapshotSchema,
+} from "./collaboration.js";
 
 const profile = {
   participantId: "00000000-0000-4000-8000-000000000002",
@@ -27,5 +31,42 @@ describe("AwarenessProfileSchema", () => {
     [{ ...profile, secret: "must-not-enter-awareness" }],
   ])("rejects an invalid or additional awareness field", (input) => {
     expect(AwarenessProfileSchema.safeParse(input).success).toBe(false);
+  });
+});
+
+describe("AwarenessIdentitySchema", () => {
+  it("accepts only the exact local identity contract", () => {
+    const identity = {
+      participantId: profile.participantId,
+      name: profile.name,
+      color: profile.color,
+      cursor: { x: 1, y: 2 },
+      phase: profile.phase,
+    };
+
+    expect(AwarenessIdentitySchema.parse(identity)).toEqual(identity);
+    expect(
+      AwarenessIdentitySchema.safeParse({ ...identity, role: "owner" }).success,
+    ).toBe(false);
+  });
+});
+
+describe("ServerPresenceSnapshotSchema", () => {
+  it("accepts a strict versioned server presence snapshot", () => {
+    const snapshot = {
+      type: "architect/presence",
+      version: 1,
+      roomId: "room-a",
+      profiles: [profile],
+    };
+
+    expect(ServerPresenceSnapshotSchema.parse(snapshot)).toEqual(snapshot);
+    expect(
+      ServerPresenceSnapshotSchema.safeParse({ ...snapshot, version: 2 }).success,
+    ).toBe(false);
+    expect(
+      ServerPresenceSnapshotSchema.safeParse({ ...snapshot, token: "secret" })
+        .success,
+    ).toBe(false);
   });
 });

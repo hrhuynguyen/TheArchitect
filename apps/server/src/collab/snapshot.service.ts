@@ -6,7 +6,15 @@ type PersistRoomSnapshot = (
   reason: string,
 ) => Promise<number>;
 
+export type SnapshotPersistenceFailure = {
+  roomId: string;
+  reason: "phase_transition" | "debounced_change" | "shutdown";
+  revision: number;
+  error: unknown;
+};
+
 type SnapshotServiceOptions = {
+  onPersistenceError?: (failure: SnapshotPersistenceFailure) => void;
   persistRoomSnapshot: PersistRoomSnapshot;
 };
 
@@ -19,6 +27,7 @@ type TrackedDocument = {
 };
 
 export function createSnapshotService({
+  onPersistenceError = () => undefined,
   persistRoomSnapshot,
 }: SnapshotServiceOptions) {
   const tracked = new Map<string, TrackedDocument>();
@@ -45,7 +54,7 @@ export function createSnapshotService({
   const flush = (
     roomId: string,
     state: TrackedDocument,
-    reason: string,
+    reason: SnapshotPersistenceFailure["reason"],
     force: boolean,
   ): Promise<void> => {
     const operation = state.writeQueue
@@ -53,7 +62,21 @@ export function createSnapshotService({
       .then(async () => {
         if (!force && !state.dirty) return;
         const persistedRevision = state.revision;
-        await persistRoomSnapshot(roomId, state.document, reason);
+        try {
+          await persistRoomSnapshot(roomId, state.document, reason);
+        } catch (error) {
+          try {
+            onPersistenceError({
+              roomId,
+              reason,
+              revision: persistedRevision,
+              error,
+            });
+          } catch {
+            // A failed observer must not replace the persistence failure.
+          }
+          throw error;
+        }
         if (state.revision === persistedRevision) state.dirty = false;
       });
     state.writeQueue = operation.catch(() => undefined);

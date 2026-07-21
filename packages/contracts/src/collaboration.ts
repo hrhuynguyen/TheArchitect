@@ -12,12 +12,26 @@ export const AwarenessCursorSchema = z
   .strict();
 export type AwarenessCursor = z.infer<typeof AwarenessCursorSchema>;
 
-export const AwarenessProfileSchema = ParticipantProfileSchema.extend({
+export const AwarenessIdentitySchema = ParticipantProfileSchema.extend({
   participantId: z.string().min(1),
   cursor: AwarenessCursorSchema.optional(),
   phase: RoomPhaseSchema,
+}).strict();
+export type AwarenessIdentity = z.infer<typeof AwarenessIdentitySchema>;
+
+export const AwarenessProfileSchema = AwarenessIdentitySchema.extend({
   lastSeenAt: z.iso.datetime(),
 }).strict();
 export type AwarenessProfile = z.infer<typeof AwarenessProfileSchema>;
 
-export type AwarenessIdentity = Omit<AwarenessProfile, "lastSeenAt">;
+export const ServerPresenceSnapshotSchema = z
+  .object({
+    type: z.literal("architect/presence"),
+    version: z.literal(1),
+    roomId: z.string().min(1),
+    profiles: z.array(AwarenessProfileSchema),
+  })
+  .strict();
+export type ServerPresenceSnapshot = z.infer<
+  typeof ServerPresenceSnapshotSchema
+>;

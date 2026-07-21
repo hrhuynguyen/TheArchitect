@@ -12,12 +12,6 @@ import {
 
 loadRootEnv();
 const env = parseEnv(process.env);
-const awarenessRegistry = createAwarenessRegistry();
-const collaboration = createHocuspocusServer({
-  awarenessRegistry,
-  env,
-  prisma,
-});
 const app = buildApp({
   roomConfig: {
     nodeEnv: env.NODE_ENV,
@@ -26,6 +20,18 @@ const app = buildApp({
   roomService: createRoomService(prismaRoomRepository, {
     ownerTokenPepper: env.OWNER_TOKEN_PEPPER,
   }),
+});
+const awarenessRegistry = createAwarenessRegistry();
+const collaboration = createHocuspocusServer({
+  awarenessRegistry,
+  env,
+  onPersistenceError({ error, reason, revision, roomId }) {
+    app.log.error(
+      { err: error, reason, revision, roomId },
+      "Collaboration snapshot persistence failed",
+    );
+  },
+  prisma,
 });
 
 await startServer({

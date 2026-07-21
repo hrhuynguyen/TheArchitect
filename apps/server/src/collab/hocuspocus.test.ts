@@ -1,5 +1,7 @@
 import * as Y from "yjs";
+import { ServerPresenceSnapshotSchema } from "@architect/contracts";
 import { HocuspocusProvider } from "@hocuspocus/provider";
+import * as encoding from "lib0/encoding";
 import WebSocket from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { participantCookieName } from "../auth/cookies.js";
@@ -14,6 +16,7 @@ import { createSnapshotService } from "./snapshot.service.js";
 const secret = "cookie-signing-secret-at-least-32-characters";
 const roomId = "00000000-0000-4000-8000-000000000001";
 const participantId = "00000000-0000-4000-8000-000000000002";
+const participantBId = "00000000-0000-4000-8000-000000000003";
 
 function cookieHeader(
   documentRoomId: string,
@@ -125,7 +128,7 @@ afterEach(() => {
 });
 
 describe("transient awareness registry", () => {
-  it("tracks validated cursor and phase changes without trusting profile identity fields", () => {
+  it("binds cursor and phase changes to the authenticated socket owner", () => {
     let now = Date.parse("2026-07-21T12:00:00.000Z");
     const registry = createAwarenessRegistry({ now: () => now });
     registry.connect(roomId, "socket-a", {
@@ -134,11 +137,17 @@ describe("transient awareness registry", () => {
       color: "#ABCDEF",
       phase: "sketch",
     });
+    registry.connect(roomId, "socket-b", {
+      participantId: "participant-b",
+      name: "Ada",
+      color: "#123456",
+      phase: "sketch",
+    });
 
     now += 1_000;
-    registry.updateParticipant(roomId, participantId, {
-      participantId: "spoofed-id",
-      name: "Spoofed name",
+    registry.updateClient(roomId, "socket-a", 101, {
+      participantId: "participant-b",
+      name: "Spoofed Ada",
       color: "#000000",
       cursor: { x: 12, y: 34 },
       phase: "architect",
@@ -153,7 +162,50 @@ describe("transient awareness registry", () => {
         phase: "architect",
         lastSeenAt: "2026-07-21T12:00:01.000Z",
       },
+      {
+        participantId: "participant-b",
+        name: "Ada",
+        color: "#123456",
+        phase: "sketch",
+        lastSeenAt: "2026-07-21T12:00:00.000Z",
+      },
     ]);
+    registry.destroy();
+  });
+
+  it("falls back to another authenticated socket when one awareness client is removed", () => {
+    let now = Date.parse("2026-07-21T12:00:00.000Z");
+    const registry = createAwarenessRegistry({ now: () => now });
+    const identity = {
+      participantId,
+      name: "Grace",
+      color: "#ABCDEF",
+      phase: "sketch" as const,
+    };
+    registry.connect(roomId, "socket-a", identity);
+    registry.updateClient(roomId, "socket-a", 101, {
+      cursor: { x: 1, y: 2 },
+      phase: "sketch",
+    });
+    now += 1_000;
+    registry.connect(roomId, "socket-b", identity);
+    registry.updateClient(roomId, "socket-b", 202, {
+      cursor: { x: 3, y: 4 },
+      phase: "architect",
+    });
+
+    expect(registry.list(roomId)[0]).toMatchObject({
+      cursor: { x: 3, y: 4 },
+      phase: "architect",
+    });
+
+    registry.removeClient(roomId, "socket-b", 202);
+    expect(registry.list(roomId)[0]).toMatchObject({
+      cursor: { x: 1, y: 2 },
+      phase: "sketch",
+    });
+    registry.disconnect(roomId, "socket-b");
+    expect(registry.list(roomId)).toHaveLength(1);
     registry.destroy();
   });
 
@@ -181,7 +233,7 @@ describe("transient awareness registry", () => {
     registry.destroy();
   });
 
-  it("removes stale entries and clears its bounded cleanup timer", () => {
+  it("hides stale presence but restores it on heartbeat without reconnecting", () => {
     vi.useFakeTimers();
     let now = 0;
     const registry = createAwarenessRegistry({
@@ -200,12 +252,120 @@ describe("transient awareness registry", () => {
     vi.advanceTimersByTime(100);
 
     expect(registry.list(roomId)).toEqual([]);
+    registry.heartbeat(roomId, "socket-a");
+    expect(registry.list(roomId)).toEqual([
+      {
+        participantId,
+        name: "Grace",
+        color: "#ABCDEF",
+        phase: "sketch",
+        lastSeenAt: "1970-01-01T00:00:01.001Z",
+      },
+    ]);
+    registry.disconnect(roomId, "socket-a");
+    registry.heartbeat(roomId, "socket-a");
+    expect(registry.list(roomId)).toEqual([]);
     registry.destroy();
     expect(vi.getTimerCount()).toBe(0);
   });
 });
 
 describe("snapshot service", () => {
+  it("reports a phase-transition failure once with room and revision context", async () => {
+    const error = new Error("phase write failed");
+    const onPersistenceError = vi.fn();
+    const persistRoomSnapshot = vi.fn().mockRejectedValue(error);
+    const service = createSnapshotService({
+      onPersistenceError,
+      persistRoomSnapshot,
+    });
+    const document = new Y.Doc();
+    service.track(roomId, document);
+    document.getMap("meta").set("phase", "architect");
+
+    await expect(service.changed(roomId, document)).rejects.toBe(error);
+    expect(onPersistenceError).toHaveBeenCalledTimes(1);
+    expect(onPersistenceError).toHaveBeenCalledWith({
+      roomId,
+      reason: "phase_transition",
+      revision: 1,
+      error,
+    });
+    document.destroy();
+  });
+
+  it("reports a debounced failure once at the flush boundary", async () => {
+    const error = new Error("debounced write failed");
+    const onPersistenceError = vi.fn();
+    const persistRoomSnapshot = vi.fn().mockRejectedValue(error);
+    const service = createSnapshotService({
+      onPersistenceError,
+      persistRoomSnapshot,
+    });
+    const document = new Y.Doc();
+    service.track(roomId, document);
+    document.getMap("shared").set("message", "dirty");
+    await service.changed(roomId, document);
+
+    await expect(service.store(roomId, document)).rejects.toBe(error);
+    expect(onPersistenceError).toHaveBeenCalledTimes(1);
+    expect(onPersistenceError).toHaveBeenCalledWith({
+      roomId,
+      reason: "debounced_change",
+      revision: 1,
+      error,
+    });
+    document.destroy();
+  });
+
+  it("reports a final shutdown failure, even for a clean tracked document", async () => {
+    const error = new Error("shutdown write failed");
+    const onPersistenceError = vi.fn();
+    const persistRoomSnapshot = vi.fn().mockRejectedValue(error);
+    const service = createSnapshotService({
+      onPersistenceError,
+      persistRoomSnapshot,
+    });
+    const document = new Y.Doc();
+    service.track(roomId, document);
+
+    await expect(service.shutdown()).rejects.toBe(error);
+    expect(onPersistenceError).toHaveBeenCalledTimes(1);
+    expect(onPersistenceError).toHaveBeenCalledWith({
+      roomId,
+      reason: "shutdown",
+      revision: 0,
+      error,
+    });
+    document.destroy();
+  });
+
+  it("preserves the original failure and retries dirtiness when the observer throws", async () => {
+    const error = new Error("database unavailable");
+    const onPersistenceError = vi.fn(() => {
+      throw new Error("logger unavailable");
+    });
+    const persistRoomSnapshot = vi
+      .fn()
+      .mockRejectedValueOnce(error)
+      .mockResolvedValueOnce(2);
+    const service = createSnapshotService({
+      onPersistenceError,
+      persistRoomSnapshot,
+    });
+    const document = new Y.Doc();
+    service.track(roomId, document);
+    document.getMap("shared").set("message", "dirty");
+    await service.changed(roomId, document);
+
+    await expect(service.store(roomId, document)).rejects.toBe(error);
+    await expect(service.store(roomId, document)).resolves.toBeUndefined();
+
+    expect(onPersistenceError).toHaveBeenCalledTimes(1);
+    expect(persistRoomSnapshot).toHaveBeenCalledTimes(2);
+    document.destroy();
+  });
+
   it("flushes a phase transition immediately and a final shutdown snapshot", async () => {
     const persistRoomSnapshot = vi.fn().mockResolvedValue(1);
     const service = createSnapshotService({ persistRoomSnapshot });
@@ -277,6 +437,16 @@ function createCollaborationDatabase() {
         roomId,
         name: "Grace",
         color: "#ABCDEF",
+        room: { phase: "sketch" as const },
+      },
+    ],
+    [
+      participantBId,
+      {
+        id: participantBId,
+        roomId,
+        name: "Ada",
+        color: "#123456",
         room: { phase: "sketch" as const },
       },
     ],
@@ -356,11 +526,16 @@ function connectProvider(options: {
 }) {
   let resolveSynced!: () => void;
   let resolveDenied!: (reason: string) => void;
+  let resolveDisconnected!: () => void;
+  const statelessPayloads: string[] = [];
   const synced = new Promise<void>((resolve) => {
     resolveSynced = resolve;
   });
   const denied = new Promise<string>((resolve) => {
     resolveDenied = resolve;
+  });
+  const disconnected = new Promise<void>((resolve) => {
+    resolveDisconnected = resolve;
   });
   const provider = new HocuspocusProvider({
     WebSocketPolyfill: cookieWebSocket(options.cookie),
@@ -369,13 +544,22 @@ function connectProvider(options: {
     onAuthenticationFailed({ reason }) {
       resolveDenied(reason);
     },
+    onClose() {
+      resolveDisconnected();
+    },
+    onDisconnect() {
+      resolveDisconnected();
+    },
+    onStateless({ payload }) {
+      statelessPayloads.push(payload);
+    },
     onSynced({ state }) {
       if (state) resolveSynced();
     },
     token: "",
     url: options.url,
   });
-  return { denied, provider, synced };
+  return { denied, disconnected, provider, statelessPayloads, synced };
 }
 
 async function eventually(
@@ -395,6 +579,205 @@ async function eventually(
 }
 
 describe("Hocuspocus WebSocket integration", () => {
+  it("binds awareness identity to its socket and broadcasts only server snapshots", async () => {
+    const memory = createCollaborationDatabase();
+    const registry = createAwarenessRegistry();
+    const collaboration = createHocuspocusServer({
+      awarenessRegistry: registry,
+      env: { COOKIE_SIGNING_SECRET: secret, WS_PORT: 0 },
+      prisma: memory.database,
+    });
+    const listening = await collaboration.listen({ host: "127.0.0.1", port: 0 });
+    const grace = connectProvider({
+      cookie: cookieHeader(roomId),
+      url: listening.webSocketUrl,
+    });
+    const ada = connectProvider({
+      cookie: cookieHeader(roomId, {
+        roomId,
+        participantId: participantBId,
+      }),
+      url: listening.webSocketUrl,
+    });
+
+    try {
+      await Promise.all([grace.synced, ada.synced]);
+      grace.provider.awareness?.setLocalStateField("profile", {
+        participantId: participantBId,
+        name: "Spoofed Ada",
+        color: "#000000",
+        cursor: { x: 12, y: 34 },
+        phase: "architect",
+      });
+
+      await eventually(() => {
+        expect(registry.list(roomId)).toEqual([
+          expect.objectContaining({
+            participantId,
+            name: "Grace",
+            color: "#ABCDEF",
+            cursor: { x: 12, y: 34 },
+            phase: "architect",
+          }),
+          expect.objectContaining({
+            participantId: participantBId,
+            name: "Ada",
+            color: "#123456",
+            phase: "sketch",
+          }),
+        ]);
+      });
+      await eventually(() => {
+        expect(
+          ada.statelessPayloads
+            .map((payload) => ServerPresenceSnapshotSchema.parse(JSON.parse(payload)))
+            .some(({ profiles }) =>
+              profiles.some(
+                (profile) =>
+                  profile.participantId === participantId &&
+                  profile.cursor?.x === 12 &&
+                  profile.phase === "architect",
+              ),
+            ),
+        ).toBe(true);
+      });
+    } finally {
+      grace.provider.destroy();
+      ada.provider.destroy();
+      await collaboration.destroy();
+    }
+  });
+
+  it("rejects a client-authored broadcast-stateless frame before peer relay", async () => {
+    const memory = createCollaborationDatabase();
+    const collaboration = createHocuspocusServer({
+      awarenessRegistry: createAwarenessRegistry(),
+      env: { COOKIE_SIGNING_SECRET: secret, WS_PORT: 0 },
+      prisma: memory.database,
+    });
+    const listening = await collaboration.listen({ host: "127.0.0.1", port: 0 });
+    const attacker = connectProvider({
+      cookie: cookieHeader(roomId),
+      url: listening.webSocketUrl,
+    });
+    const peer = connectProvider({
+      cookie: cookieHeader(roomId, {
+        roomId,
+        participantId: participantBId,
+      }),
+      url: listening.webSocketUrl,
+    });
+    const spoof = JSON.stringify({
+      type: "architect/presence",
+      version: 1,
+      roomId,
+      profiles: [
+        {
+          participantId: participantBId,
+          name: "Spoofed server payload",
+          color: "#000000",
+          phase: "deploy",
+          lastSeenAt: "2026-07-21T12:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await Promise.all([attacker.synced, peer.synced]);
+      const frame = encoding.createEncoder();
+      encoding.writeVarString(frame, roomId);
+      encoding.writeVarUint(frame, 6);
+      encoding.writeVarString(frame, spoof);
+      attacker.provider.configuration.websocketProvider.send(
+        encoding.toUint8Array(frame),
+      );
+
+      await attacker.disconnected;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(peer.statelessPayloads).not.toContain(spoof);
+    } finally {
+      attacker.provider.destroy();
+      peer.provider.destroy();
+      await collaboration.destroy();
+    }
+  });
+
+  it("rejects an awareness mutation for a client owned by another socket", async () => {
+    const memory = createCollaborationDatabase();
+    const registry = createAwarenessRegistry();
+    const collaboration = createHocuspocusServer({
+      awarenessRegistry: registry,
+      env: { COOKIE_SIGNING_SECRET: secret, WS_PORT: 0 },
+      prisma: memory.database,
+    });
+    const listening = await collaboration.listen({ host: "127.0.0.1", port: 0 });
+    const attacker = connectProvider({
+      cookie: cookieHeader(roomId),
+      url: listening.webSocketUrl,
+    });
+    const peer = connectProvider({
+      cookie: cookieHeader(roomId, {
+        roomId,
+        participantId: participantBId,
+      }),
+      url: listening.webSocketUrl,
+    });
+
+    try {
+      await Promise.all([attacker.synced, peer.synced]);
+      const peerClientId = peer.provider.awareness!.clientID;
+      peer.provider.awareness!.setLocalStateField("presence", {
+        phase: "sketch",
+      });
+      await eventually(() => {
+        expect(attacker.provider.awareness?.getStates().has(peerClientId)).toBe(
+          true,
+        );
+      });
+      const peerClock = peer.provider.awareness!.meta.get(peerClientId)!.clock;
+      const awarenessUpdate = encoding.createEncoder();
+      encoding.writeVarUint(awarenessUpdate, 1);
+      encoding.writeVarUint(awarenessUpdate, peerClientId);
+      encoding.writeVarUint(awarenessUpdate, peerClock + 1);
+      encoding.writeVarString(
+        awarenessUpdate,
+        JSON.stringify({
+          profile: {
+            participantId: participantBId,
+            name: "Spoofed Ada",
+            color: "#000000",
+            cursor: { x: 99, y: 99 },
+            phase: "deploy",
+          },
+        }),
+      );
+      const frame = encoding.createEncoder();
+      encoding.writeVarString(frame, roomId);
+      encoding.writeVarUint(frame, 1);
+      encoding.writeVarUint8Array(frame, encoding.toUint8Array(awarenessUpdate));
+      attacker.provider.configuration.websocketProvider.send(
+        encoding.toUint8Array(frame),
+      );
+
+      await attacker.disconnected;
+      expect(peer.provider.awareness?.getStates().get(peerClientId)).not.toEqual(
+        expect.objectContaining({ profile: expect.anything() }),
+      );
+      expect(registry.list(roomId)).toEqual([
+        expect.objectContaining({
+          participantId: participantBId,
+          name: "Ada",
+          color: "#123456",
+          phase: "sketch",
+        }),
+      ]);
+    } finally {
+      attacker.provider.destroy();
+      peer.provider.destroy();
+      await collaboration.destroy();
+    }
+  });
+
   it("syncs an authenticated room, flushes shutdown, and restores on reconnect", async () => {
     const memory = createCollaborationDatabase();
     const registry = createAwarenessRegistry();
