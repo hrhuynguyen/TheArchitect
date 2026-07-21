@@ -93,7 +93,7 @@ The web application does not receive or store AI keys, AWS credentials, owner-to
 
 ### 4.2 Application server
 
-`apps/server` initially runs Fastify and Hocuspocus in one process. It owns:
+`apps/server` initially runs Fastify and Hocuspocus in one process and uses Prisma for PostgreSQL access and migrations. It owns:
 
 - Room and participant issuance
 - Room-owner credential verification
@@ -175,7 +175,7 @@ Owner authority is required only for real AWS change-set execution and owner-onl
 
 ## 7. Persistence model
 
-PostgreSQL is the durable product store. Live cursors remain transient awareness state.
+PostgreSQL is the durable product store, accessed through Prisma. Live cursors remain transient awareness state.
 
 Core records are:
 
