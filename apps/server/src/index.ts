@@ -1,9 +1,10 @@
 import { buildApp } from "./app.js";
+import { parseEnv } from "./config/env.js";
 
+const env = parseEnv(process.env);
 const app = buildApp();
-const port = Number(process.env.PORT ?? 3001);
 
 await app.listen({
   host: "0.0.0.0",
-  port,
+  port: env.HTTP_PORT,
 });

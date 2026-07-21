@@ -1,0 +1,204 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoomMode {
+  shared
+  solo
+}
+
+enum RoomPhase {
+  sketch
+  reconstructing
+  architect
+  deploy
+}
+
+enum TransitionKind {
+  ready
+}
+
+enum TransitionState {
+  claimed
+  running
+  succeeded
+  failed
+}
+
+enum DeployTarget {
+  localstack
+  aws
+}
+
+enum DeployState {
+  queued
+  synthesizing
+  creating_change_set
+  awaiting_owner
+  executing
+  succeeded
+  failed
+  cancelled
+}
+
+model Room {
+  id                 String                 @id @default(uuid())
+  mode               RoomMode
+  phase              RoomPhase              @default(sketch)
+  ownerTokenHash     String
+  currentRevisionId  String?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  expiresAt          DateTime?
+  participants       Participant[]
+  snapshots          YjsSnapshot[]
+  revisions          ArchitectureRevision[]
+  history            HistoryEvent[]
+  aiRuns              AiRun[]
+  architectProposals ArchitectProposal[]
+  transitions        TransitionJob[]
+  deployJobs         DeployJob[]
+}
+
+model Participant {
+  id         String   @id @default(uuid())
+  roomId     String
+  name       String
+  color      String
+  joinedAt   DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  room       Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([roomId])
+}
+
+model YjsSnapshot {
+  id        String   @id @default(uuid())
+  roomId    String
+  version   Int
+  payload   Bytes
+  reason    String
+  createdAt DateTime @default(now())
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, version])
+}
+
+model ArchitectureRevision {
+  id           String      @id @default(uuid())
+  roomId       String
+  version      Int
+  architecture Json
+  layout       Json
+  requirements Json
+  stage        String
+  authorType   String
+  authorId     String?
+  rationale    String
+  createdAt    DateTime    @default(now())
+  room         Room        @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  deployJobs   DeployJob[]
+
+  @@unique([roomId, version])
+}
+
+model HistoryEvent {
+  id        String   @id @default(uuid())
+  roomId    String
+  kind      String
+  status    String
+  actorType String
+  actorId   String?
+  title     String
+  summary   String?
+  details   Json?
+  traceId   String?
+  createdAt DateTime @default(now())
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, createdAt])
+}
+
+model AiRun {
+  id         String    @id @default(uuid())
+  roomId     String?
+  traceId    String    @unique
+  task       String
+  provider   String
+  model      String
+  status     String
+  tokenMeta  Json?
+  errorCode  String?
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  room       Room?     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+}
+
+model ArchitectProposal {
+  id             String   @id @default(uuid())
+  roomId         String
+  baseRevisionId String
+  operations     Json
+  responseText   String
+  state          String   @default("proposal_ready")
+  traceId        String   @unique
+  createdAt      DateTime @default(now())
+  reviewedAt     DateTime?
+  room           Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, createdAt])
+}
+
+model TransitionJob {
+  id             String          @id @default(uuid())
+  roomId         String
+  sourceRevision Int
+  kind           TransitionKind
+  state          TransitionState @default(claimed)
+  traceId        String          @unique
+  errorCode      String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  room           Room            @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, sourceRevision, kind])
+}
+
+model DeployJob {
+  id            String               @id @default(uuid())
+  roomId        String
+  revisionId    String
+  target        DeployTarget
+  state         DeployState          @default(queued)
+  traceId       String               @unique
+  region        String?
+  stackName     String?
+  changeSetName String?
+  approvalFacts Json
+  errorCode     String?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+  finishedAt    DateTime?
+  room          Room                 @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  revision      ArchitectureRevision @relation(fields: [revisionId], references: [id], onDelete: Restrict)
+  logs          DeployLog[]
+
+  @@index([roomId, createdAt])
+}
+
+model DeployLog {
+  id        String    @id @default(uuid())
+  jobId     String
+  sequence  Int
+  stage     String
+  line      String
+  createdAt DateTime  @default(now())
+  job       DeployJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, sequence])
+}
