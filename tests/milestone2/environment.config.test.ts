@@ -7,20 +7,35 @@ afterEach(() => {
   vi.resetModules();
 });
 
+async function loadConfig(distDir: string | undefined) {
+  vi.stubEnv("ARCHITECT_NEXT_DIST_DIR", distDir);
+  vi.resetModules();
+  return (await import("../../apps/web/next.config.js")).default;
+}
+
 describe("Milestone 2 Next output isolation", () => {
-  it("selects the exact harness-owned distDir instead of shared .next", async () => {
-    const webRoot = path.resolve(process.cwd(), "apps/web");
-    const ownedOutput = path.join(os.tmpdir(), "architect-milestone2-next-owned");
-    const distDir = path.relative(webRoot, ownedOutput);
-    vi.stubEnv("ARCHITECT_NEXT_DIST_DIR", distDir);
-    vi.resetModules();
+  it("preserves the normal Next output when the harness variable is unset", async () => {
+    const config = await loadConfig(undefined);
 
-    const config = (await import("../../apps/web/next.config.js")).default;
+    expect(config).not.toHaveProperty("distDir");
+  });
 
-    expect(config.distDir).toBe(distDir);
-    expect(path.resolve(webRoot, config.distDir!)).toBe(ownedOutput);
-    expect(path.resolve(webRoot, config.distDir!)).not.toBe(
-      path.join(webRoot, ".next"),
+  it("accepts only the exact harness-owned output name", async () => {
+    const config = await loadConfig(".milestone2-next");
+
+    expect(config.distDir).toBe(".milestone2-next");
+  });
+
+  it.each([
+    ["parent traversal", ".."],
+    ["workspace traversal", "../.."],
+    ["an absolute path", path.join(os.tmpdir(), "architect-outside")],
+    ["the shared Next output", ".next"],
+    ["an arbitrary output name", "build-output"],
+    ["an empty value", ""],
+  ])("rejects %s before Next can build", async (_description, value) => {
+    await expect(loadConfig(value)).rejects.toThrow(
+      'ARCHITECT_NEXT_DIST_DIR must be ".milestone2-next" when set',
     );
   });
 });
