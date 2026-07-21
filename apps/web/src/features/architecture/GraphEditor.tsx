@@ -40,6 +40,7 @@ import {
 } from "react";
 import type * as Y from "yjs";
 
+import { ArchitectPanel } from "../architect/ArchitectPanel";
 import { createRoomCollab } from "../workspace/collab";
 import {
   layoutFromNodes,
@@ -63,6 +64,7 @@ type GraphEditorDependencies = Readonly<{
 }>;
 
 type GraphEditorProps = Readonly<{
+  canReview?: boolean;
   dependencies?: GraphEditorDependencies;
   roomId: string;
 }>;
@@ -130,6 +132,7 @@ function conflictMessage(body: unknown): string | null {
 }
 
 export function GraphEditor({
+  canReview = true,
   dependencies = EMPTY_DEPENDENCIES,
   roomId,
 }: GraphEditorProps) {
@@ -482,7 +485,10 @@ export function GraphEditor({
             <p className="section-kicker">Typed AWS graph</p>
             <h1>Shape the buildable system.</h1>
           </div>
-          <span>{architecture.resources.length} resources</span>
+          <span>
+            {architecture.resources.length}{" "}
+            {architecture.resources.length === 1 ? "resource" : "resources"}
+          </span>
         </header>
         {requestError ? <p className="architecture-alert" role="alert">{requestError}</p> : null}
         <div className="architecture-canvas__flow">
@@ -545,6 +551,12 @@ export function GraphEditor({
         </div>
       </section>
       <aside className="architecture-sidebar" aria-label="Architecture controls">
+        <ArchitectPanel
+          baseRevisionId={state.architecture.revisionId}
+          canReview={canReview}
+          dependencies={{ fetch: fetchBoundary, createId }}
+          roomId={roomId}
+        />
         {selectedResource ? (
           <section className="architecture-selection">
             <p className="section-kicker">Selected resource</p>

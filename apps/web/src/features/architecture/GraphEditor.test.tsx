@@ -5,6 +5,7 @@ import {
   ARCHITECTURE_CURRENT_KEY,
   ARCHITECTURE_LAYOUT_MAP_KEY,
   ARCHITECTURE_MAP_KEY,
+  ArchitectTurnSchema,
   defaultRequirementsProfile,
 } from "@architect/contracts";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
@@ -77,6 +78,39 @@ const initialState = {
     nodes: [{ resourceId: "bucket", x: 0, y: 0 }],
   },
 };
+
+const architectProposal = ArchitectTurnSchema.parse({
+  id: "turn-a",
+  roomId: "room-a",
+  baseRevisionId: "revision-a",
+  message: "Add a queue.",
+  actorType: "participant",
+  actorId: "participant-a",
+  idempotencyKey: "turn-request-a",
+  sourceSnapshotVersion: 7,
+  sourceProtectedDigest:
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  traceId: "architect:turn-a",
+  state: "proposal_ready",
+  kind: "proposal",
+  responseText: "I can add an SQS queue.",
+  operations: [{
+    type: "add_resource",
+    resource: {
+      id: "queue",
+      type: "SQS",
+      name: "Upload queue",
+      properties: {},
+    },
+    reason: "Buffer asynchronous uploads.",
+  }],
+  appliedRevisionId: null,
+  error: null,
+  createdAt: "2026-07-21T12:00:00.000Z",
+  reviewedAt: null,
+  reviewedByParticipantId: null,
+  reviewRationale: null,
+});
 
 class FakeProvider {
   synced = true;
@@ -158,6 +192,9 @@ function setup() {
   const provider = new FakeProvider();
   const destroy = vi.fn(() => doc.destroy());
   const fetchBoundary = vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith("/architect/turns") && !init?.method) {
+      return response({ turns: [] });
+    }
     if (url.endsWith("/revisions") && !init?.method) {
       return response({ revisions: [], events: [] });
     }
@@ -195,6 +232,7 @@ describe("GraphEditor", () => {
     );
 
     expect(await screen.findByText("Uploads")).toBeVisible();
+    expect(screen.getByText("1 resource")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Simulate node move" }));
 
     await waitFor(() => expect(test.fetchBoundary).toHaveBeenCalledWith(
@@ -250,7 +288,20 @@ describe("GraphEditor", () => {
 
   it("shows a bounded public error and remains usable after an invalid response", async () => {
     const test = setup();
-    test.fetchBoundary.mockImplementationOnce(async () => response({ secret: "no" }));
+    let invalidHistory = true;
+    test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/architect/turns") && !init?.method) {
+        return response({ turns: [] });
+      }
+      if (url.endsWith("/revisions") && !init?.method) {
+        if (invalidHistory) {
+          invalidHistory = false;
+          return response({ secret: "no" });
+        }
+        return response({ revisions: [], events: [] });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
     render(<GraphEditor dependencies={test.dependencies as never} roomId="room-a" />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -269,6 +320,9 @@ describe("GraphEditor", () => {
     const test = setup();
     const operationResponse = deferred<Response>();
     test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/architect/turns") && !init?.method) {
+        return response({ turns: [] });
+      }
       if (url.endsWith("/revisions") && !init?.method) {
         return response({ revisions: [], events: [] });
       }
@@ -327,6 +381,9 @@ describe("GraphEditor", () => {
     const test = setup();
     const saveResponse = deferred<Response>();
     test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/architect/turns") && !init?.method) {
+        return response({ turns: [] });
+      }
       if (url.endsWith("/revisions") && init?.method === "POST") {
         return saveResponse.promise;
       }
@@ -420,6 +477,9 @@ describe("GraphEditor", () => {
         url: string,
         init?: RequestInit,
       ) => {
+        if (url.endsWith("/architect/turns") && !init?.method) {
+          return response({ turns: [] });
+        }
         if (url.endsWith("/revisions") && !init?.method) {
           reads += 1;
           return response(reads === 1
@@ -434,8 +494,8 @@ describe("GraphEditor", () => {
       <GraphEditor dependencies={editorB.dependencies as never} roomId="room-a" />
     </>);
     await waitFor(() => {
-      expect(editorA.fetchBoundary).toHaveBeenCalledTimes(1);
-      expect(editorB.fetchBoundary).toHaveBeenCalledTimes(1);
+      expect(editorA.fetchBoundary).toHaveBeenCalledTimes(2);
+      expect(editorB.fetchBoundary).toHaveBeenCalledTimes(2);
     });
 
     act(() => {
@@ -444,8 +504,8 @@ describe("GraphEditor", () => {
     });
 
     await waitFor(() => {
-      expect(editorA.fetchBoundary).toHaveBeenCalledTimes(2);
-      expect(editorB.fetchBoundary).toHaveBeenCalledTimes(2);
+      expect(editorA.fetchBoundary).toHaveBeenCalledTimes(3);
+      expect(editorB.fetchBoundary).toHaveBeenCalledTimes(3);
     });
     expect(screen.getAllByRole("heading", { name: "Revision 2" }))
       .toHaveLength(2);
@@ -458,6 +518,9 @@ describe("GraphEditor", () => {
     const saveResponse = deferred<Response>();
     let historyReads = 0;
     test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/architect/turns") && !init?.method) {
+        return response({ turns: [] });
+      }
       if (url.endsWith("/revisions") && init?.method === "POST") {
         return saveResponse.promise;
       }
@@ -503,6 +566,9 @@ describe("GraphEditor", () => {
   it("surfaces the bounded working-state conflict from an operation 409", async () => {
     const test = setup();
     test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/architect/turns") && !init?.method) {
+        return response({ turns: [] });
+      }
       if (url.endsWith("/revisions") && !init?.method) {
         return response({ revisions: [], events: [] });
       }
@@ -530,6 +596,9 @@ describe("GraphEditor", () => {
   it("surfaces the bounded stale conflict when revision save beats an operation", async () => {
     const test = setup();
     test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/architect/turns") && !init?.method) {
+        return response({ turns: [] });
+      }
       if (url.endsWith("/revisions") && !init?.method) {
         return response({ revisions: [], events: [] });
       }
@@ -557,6 +626,9 @@ describe("GraphEditor", () => {
   it("surfaces the bounded stale-revision conflict from a revision 409", async () => {
     const test = setup();
     test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/architect/turns") && !init?.method) {
+        return response({ turns: [] });
+      }
       if (url.endsWith("/revisions") && !init?.method) {
         return response({ revisions: [], events: [] });
       }
@@ -582,5 +654,59 @@ describe("GraphEditor", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Architecture revision is stale. Current revision: revision-b.",
     );
+  });
+
+  it("never replaces the Yjs graph from an Architect apply HTTP response", async () => {
+    const test = setup();
+    const applied = ArchitectTurnSchema.parse({
+      ...architectProposal,
+      state: "applied",
+      appliedRevisionId: "revision-b",
+      reviewedAt: "2026-07-21T12:01:00.000Z",
+      reviewedByParticipantId: "participant-a",
+      reviewRationale: "Queue asynchronous uploads.",
+    });
+    test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/architect/turns") && !init?.method) {
+        return response({ turns: [architectProposal] });
+      }
+      if (url.endsWith("/revisions") && !init?.method) {
+        return response({ revisions: [], events: [] });
+      }
+      if (url.endsWith("/architect/patches/turn-a/apply")) {
+        return response({
+          ...applied,
+          graphState: {
+            architecture: {
+              resources: [{ id: "http-only", name: "HTTP-only queue" }],
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const user = userEvent.setup();
+    render(
+      <GraphEditor
+        canReview
+        dependencies={test.dependencies as never}
+        roomId="room-a"
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Review patch" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Review rationale" }),
+      "Queue asynchronous uploads.",
+    );
+    await user.click(screen.getByRole("button", { name: "Apply patch" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Architect returned an invalid response.",
+    );
+    expect(screen.getByRole("button", { name: "Uploads" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "HTTP-only queue" })).toBeNull();
+    expect(test.doc.getMap(ARCHITECTURE_MAP_KEY).get(ARCHITECTURE_CURRENT_KEY))
+      .toEqual(initialState.architecture);
   });
 });

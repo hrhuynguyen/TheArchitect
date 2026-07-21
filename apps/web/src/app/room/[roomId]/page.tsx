@@ -170,7 +170,10 @@ export default function RoomPage({ params }: RoomPageProps) {
           />
         </div>
       ) : room.phase === "architect" ? (
-        <GraphEditor roomId={room.id} />
+        <GraphEditor
+          canReview={room.currentParticipantId !== null}
+          roomId={room.id}
+        />
       ) : (
         <div className="workspace-empty" id={visiblePhase}>
           <span className="workspace-empty__mark" aria-hidden="true" />

@@ -44,9 +44,9 @@ vi.mock("../../../features/sketch/Whiteboard", () => ({
 }));
 
 vi.mock("../../../features/architecture/GraphEditor", () => ({
-  GraphEditor: ({ roomId }: { roomId: string }) => (
+  GraphEditor: ({ canReview, roomId }: { canReview: boolean; roomId: string }) => (
     <section aria-label="Connected architecture editor">
-      Editing room {roomId}
+      Editing room {roomId}. {canReview ? "Review enabled" : "Review disabled"}.
     </section>
   ),
 }));
@@ -221,10 +221,23 @@ describe("room route", () => {
 
     expect(
       await screen.findByRole("region", { name: "Connected architecture editor" }),
-    ).toHaveTextContent("Editing room room-ada");
+    ).toHaveTextContent("Editing room room-ada. Review enabled.");
     expect(
       screen.queryByRole("heading", { name: "Shape the system into a buildable plan." }),
     ).not.toBeInTheDocument();
+  });
+
+  it("disables Architect patch review without a current participant session", async () => {
+    getRoom.mockResolvedValueOnce({
+      ...baseRoom,
+      phase: "architect",
+      currentParticipantId: null,
+    });
+    await renderRoomPage();
+
+    expect(
+      await screen.findByRole("region", { name: "Connected architecture editor" }),
+    ).toHaveTextContent("Review disabled");
   });
 
   it("suppresses a room result that resolves after unmount", async () => {

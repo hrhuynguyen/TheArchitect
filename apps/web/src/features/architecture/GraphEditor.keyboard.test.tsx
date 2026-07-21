@@ -151,6 +151,9 @@ describe("GraphEditor React Flow keyboard support", () => {
     );
     const provider = new FakeProvider();
     const fetchBoundary = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/architect/turns") && !init?.method) {
+        return response({ turns: [] });
+      }
       if (url.endsWith("/revisions") && !init?.method) {
         return response({ revisions: [], events: [] });
       }
