@@ -8,6 +8,7 @@
     "./architecture": "./src/architecture.ts",
     "./collaboration": "./src/collaboration.ts",
     "./infrastructure": "./src/infrastructure.ts",
+    "./operations": "./src/operations.ts",
     "./requirements": "./src/requirements.ts",
     "./reconstruction": "./src/reconstruction.ts",
     "./rooms": "./src/rooms.ts",
