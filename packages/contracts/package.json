@@ -4,10 +4,14 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./rooms": "./src/rooms.ts"
   },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
   }
 }
