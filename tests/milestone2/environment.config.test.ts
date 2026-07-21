@@ -39,3 +39,38 @@ describe("Milestone 2 Next output isolation", () => {
     );
   });
 });
+
+describe("Milestone 2 server environment isolation", () => {
+  it("owns deterministic AI configuration over caller provider settings", async () => {
+    const { createMilestone2ServerEnv } = await import("./environment.js");
+
+    const result = createMilestone2ServerEnv(
+      {
+        AI_PROVIDER: "openai",
+        ANTHROPIC_API_KEY: "caller-anthropic-key",
+        ANTHROPIC_MODEL: "caller-anthropic-model",
+        OPENAI_API_KEY: "caller-openai-key",
+      },
+      {
+        cookieSigningSecret: "test-cookie-secret",
+        httpPort: 31_001,
+        ownerTokenPepper: "test-owner-pepper",
+        webUrl: "http://127.0.0.1:3100",
+        wsPort: 31_002,
+      },
+    );
+
+    expect(result).toMatchObject({
+      AI_PROVIDER: "test",
+      ANTHROPIC_API_KEY: "",
+      ANTHROPIC_MODEL: "",
+      COOKIE_SIGNING_SECRET: "test-cookie-secret",
+      HTTP_PORT: "31001",
+      NODE_ENV: "test",
+      OPENAI_API_KEY: "",
+      OWNER_TOKEN_PEPPER: "test-owner-pepper",
+      PUBLIC_APP_URL: "http://127.0.0.1:3100",
+      WS_PORT: "31002",
+    });
+  });
+});

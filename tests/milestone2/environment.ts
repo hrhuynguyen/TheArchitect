@@ -26,6 +26,39 @@ export type Milestone2Environment = {
   webUrl: string;
 };
 
+type Milestone2ServerEnvOptions = Readonly<{
+  cookieSigningSecret: string;
+  httpPort: number;
+  ownerTokenPepper: string;
+  webUrl: string;
+  wsPort: number;
+}>;
+
+export function createMilestone2ServerEnv(
+  sharedEnv: NodeJS.ProcessEnv,
+  {
+    cookieSigningSecret,
+    httpPort,
+    ownerTokenPepper,
+    webUrl,
+    wsPort,
+  }: Milestone2ServerEnvOptions,
+): NodeJS.ProcessEnv {
+  return {
+    ...sharedEnv,
+    AI_PROVIDER: "test",
+    ANTHROPIC_API_KEY: "",
+    ANTHROPIC_MODEL: "",
+    COOKIE_SIGNING_SECRET: cookieSigningSecret,
+    HTTP_PORT: String(httpPort),
+    NODE_ENV: "test",
+    OPENAI_API_KEY: "",
+    OWNER_TOKEN_PEPPER: ownerTokenPepper,
+    PUBLIC_APP_URL: webUrl,
+    WS_PORT: String(wsPort),
+  };
+}
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -240,15 +273,13 @@ export async function startMilestone2Environment(): Promise<Milestone2Environmen
       },
     );
 
-    const serverEnv = {
-      ...sharedEnv,
-      COOKIE_SIGNING_SECRET: cookieSigningSecret,
-      HTTP_PORT: String(httpPort),
-      NODE_ENV: "test",
-      OWNER_TOKEN_PEPPER: ownerTokenPepper,
-      PUBLIC_APP_URL: webUrl,
-      WS_PORT: String(wsPort),
-    };
+    const serverEnv = createMilestone2ServerEnv(sharedEnv, {
+      cookieSigningSecret,
+      httpPort,
+      ownerTokenPepper,
+      webUrl,
+      wsPort,
+    });
     const launchServer = async () => {
       serverProcess = startOwnedProcess(
         "Architect server",

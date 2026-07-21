@@ -156,12 +156,16 @@ test("proves two-context consensus, one transition, and restart recovery", async
     ).toBeVisible();
 
     await grace.getByRole("button", { name: "I’m ready" }).click();
-    const architectHeading = "Shape the system into a buildable plan.";
+    const architectHeading = "Shape the buildable system.";
     await expect(
       ada.getByRole("heading", { name: architectHeading }),
     ).toBeVisible();
     await expect(
       grace.getByRole("heading", { name: architectHeading }),
+    ).toBeVisible();
+    await expect(ada.getByText("Sketch storage", { exact: true })).toBeVisible();
+    await expect(
+      ada.getByRole("heading", { name: "Revision 1" }),
     ).toBeVisible();
 
     await expect
@@ -172,16 +176,17 @@ test("proves two-context consensus, one transition, and restart recovery", async
             phase: true,
             transitions: {
               where: { kind: "ready" },
-              select: { id: true, sourceRevision: true },
+              select: { id: true, sourceRevision: true, state: true },
             },
           },
         });
         return {
           phase: room?.phase,
           readyJobs: room?.transitions.length,
+          readyState: room?.transitions[0]?.state,
         };
       })
-      .toEqual({ phase: "reconstructing", readyJobs: 1 });
+      .toEqual({ phase: "architect", readyJobs: 1, readyState: "succeeded" });
     const transition = await prisma.transitionJob.findFirstOrThrow({
       where: { roomId, kind: "ready" },
       select: { sourceRevision: true },
