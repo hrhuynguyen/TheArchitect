@@ -4,9 +4,11 @@ import type {
   ApplyArchitectPatchRequest,
   ArchitectTurn,
   DestructiveConfirmation,
+  RejectArchitectPatchRequest,
 } from "@architect/contracts";
 import { Button } from "@architect/ui";
-import { useState } from "react";
+import { createPortal } from "react-dom";
+import { useEffect, useRef, useState } from "react";
 
 type ProposalTurn = Extract<ArchitectTurn, { kind: "proposal" }>;
 type ReviewAction = "apply" | "reject";
@@ -35,13 +37,16 @@ function isDestructive(turn: ProposalTurn) {
 
 export function PatchReviewDialog({
   busyAction,
+  error,
   onApply,
   onClose,
   onReject,
   retryAction,
+  retryRequest,
   turn,
 }: Readonly<{
   busyAction: ReviewAction | null;
+  error: string | null;
   onApply(input: Readonly<{
     rationale: string;
     destructiveConfirmation?: DestructiveConfirmation;
@@ -49,11 +54,23 @@ export function PatchReviewDialog({
   onClose(): void;
   onReject(rationale: string): void;
   retryAction: ReviewAction | null;
+  retryRequest: ApplyArchitectPatchRequest | RejectArchitectPatchRequest | null;
   turn: ProposalTurn;
 }>) {
-  const [rationale, setRationale] = useState("");
-  const [destructiveConfirmed, setDestructiveConfirmed] = useState(false);
-  const [destructiveRationale, setDestructiveRationale] = useState("");
+  const retryDestructiveConfirmation = retryRequest
+    && "baseRevisionId" in retryRequest
+    ? retryRequest.destructiveConfirmation
+    : undefined;
+  const [rationale, setRationale] = useState(retryRequest?.rationale ?? "");
+  const [destructiveConfirmed, setDestructiveConfirmed] = useState(
+    retryDestructiveConfirmation?.confirmed ?? false,
+  );
+  const [destructiveRationale, setDestructiveRationale] = useState(
+    retryDestructiveConfirmation?.rationale ?? "",
+  );
+  const [portalNode, setPortalNode] = useState<HTMLElement | null>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  const rationaleRef = useRef<HTMLTextAreaElement>(null);
   const destructive = isDestructive(turn);
   const lockedForRetry = retryAction !== null;
   const applyEnabled = rationale.trim().length > 0
@@ -67,12 +84,74 @@ export function PatchReviewDialog({
         }
       : undefined;
 
-  return (
+  useEffect(() => {
+    const node = document.createElement("div");
+    document.body.appendChild(node);
+    setPortalNode(node);
+    return () => node.remove();
+  }, []);
+
+  useEffect(() => {
+    if (portalNode === null) return;
+    const previousFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const background = Array.from(document.body.children)
+      .filter((element) => element !== portalNode)
+      .map((element) => ({
+        ariaHidden: element.getAttribute("aria-hidden"),
+        element,
+        inert: element.hasAttribute("inert"),
+      }));
+    for (const { element } of background) {
+      element.setAttribute("aria-hidden", "true");
+      element.setAttribute("inert", "");
+    }
+    queueMicrotask(() => {
+      if (rationaleRef.current?.isConnected) rationaleRef.current.focus();
+    });
+    return () => {
+      for (const { ariaHidden, element, inert } of background) {
+        if (ariaHidden === null) element.removeAttribute("aria-hidden");
+        else element.setAttribute("aria-hidden", ariaHidden);
+        if (!inert) element.removeAttribute("inert");
+      }
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, [portalNode]);
+
+  if (portalNode === null) return null;
+
+  return createPortal(
     <div className="architect-dialog-backdrop">
       <section
         aria-labelledby="architect-review-title"
         aria-modal="true"
         className="architect-dialog"
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && busyAction === null) {
+            event.preventDefault();
+            onClose();
+            return;
+          }
+          if (event.key !== "Tab") return;
+          const focusable = Array.from(
+            dialogRef.current?.querySelectorAll<HTMLElement>(
+              "button:not([disabled]), textarea:not([disabled]), input:not([disabled])",
+            ) ?? [],
+          ).filter((element) => element.tabIndex !== -1);
+          const first = focusable[0];
+          const last = focusable.at(-1);
+          if (!first || !last) return;
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        }}
+        ref={dialogRef}
         role="dialog"
       >
         <header className="architect-dialog__header">
@@ -81,7 +160,7 @@ export function PatchReviewDialog({
             <h2 id="architect-review-title">Review Architect patch</h2>
           </div>
           <Button
-            disabled={busyAction !== null || retryAction !== null}
+            disabled={busyAction !== null}
             onClick={onClose}
             type="button"
             variant="quiet"
@@ -104,6 +183,7 @@ export function PatchReviewDialog({
             disabled={busyAction !== null || lockedForRetry}
             maxLength={500}
             onChange={(event) => setRationale(event.target.value)}
+            ref={rationaleRef}
             value={rationale}
           />
         </label>
@@ -134,6 +214,9 @@ export function PatchReviewDialog({
           <p className="architect-dialog__retry-note">
             Retry will resend the exact prior review request.
           </p>
+        ) : null}
+        {error ? (
+          <p className="architect-panel__error" role="alert">{error}</p>
         ) : null}
         <footer className="architect-dialog__actions">
           <Button
@@ -168,6 +251,7 @@ export function PatchReviewDialog({
           </Button>
         </footer>
       </section>
-    </div>
+    </div>,
+    portalNode,
   );
 }

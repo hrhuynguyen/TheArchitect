@@ -7,6 +7,7 @@ import {
 } from "@architect/contracts";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -98,8 +99,27 @@ function response(body: unknown, status = 200) {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 function list(turns: readonly ArchitectTurn[]) {
   return response({ turns });
+}
+
+function architectError(
+  code: string,
+  currentRevisionId: string | null = null,
+) {
+  return code === "revision_conflict" || code === "working_state_conflict"
+    ? { code, message: "Architecture changed", currentRevisionId }
+    : { code, message: "Architect request failed" };
 }
 
 function renderPanel(
@@ -329,7 +349,11 @@ describe("ArchitectPanel", () => {
       expect(await screen.findByRole("alert")).toHaveTextContent(
         "Architect review could not be reached.",
       );
-      expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Close" })).toBeEnabled();
+      await user.click(screen.getByRole("button", { name: "Close" }));
+      await user.click(screen.getByRole("button", { name: "Review patch" }));
+      expect(screen.getByRole("textbox", { name: "Review rationale" }))
+        .toHaveValue(rationale);
       await user.click(screen.getByRole("button", {
         name: action === "apply" ? "Retry apply" : "Retry reject",
       }));
@@ -341,6 +365,95 @@ describe("ArchitectPanel", () => {
       expect(keys).toEqual(["stable-client-key", "stable-client-key"]);
     },
   );
+
+  it.each([
+    ["unauthorized", 401],
+    ["invalid_architect_request", 422],
+    ["revision_conflict", 409],
+    ["working_state_conflict", 409],
+    ["terminal_conflict", 409],
+    ["idempotency_conflict", 409],
+    ["destructive_confirmation_required", 422],
+    ["invalid_agent_patch", 422],
+    ["architect_turn_not_found", 404],
+  ] as const)(
+    "unlocks review inputs after deterministic %s",
+    async (code, status) => {
+      const fetchBoundary = vi.fn(async (_url: string, init?: RequestInit) =>
+        init?.method
+          ? response(architectError(code, "revision-b"), status)
+          : list([proposal]));
+      const user = userEvent.setup();
+      renderPanel(fetchBoundary);
+
+      await user.click(await screen.findByRole("button", { name: "Review patch" }));
+      const rationale = screen.getByRole("textbox", { name: "Review rationale" });
+      await user.type(rationale, "Review this queue.");
+      await user.click(screen.getByRole("button", { name: "Apply patch" }));
+
+      await screen.findByRole("alert");
+      expect(rationale).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Close" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Apply patch" })).toBeEnabled();
+      expect(screen.queryByRole("button", { name: "Retry apply" })).toBeNull();
+    },
+  );
+
+  it.each([
+    ["unauthorized", 401],
+    ["invalid_architect_request", 422],
+  ] as const)(
+    "unlocks the turn composer after deterministic %s",
+    async (code, status) => {
+      const fetchBoundary = vi.fn(async (_url: string, init?: RequestInit) =>
+        init?.method
+          ? response(architectError(code), status)
+          : list([]));
+      const user = userEvent.setup();
+      renderPanel(fetchBoundary);
+
+      const composer = await screen.findByRole("textbox", {
+        name: "Ask the Architect",
+      });
+      await user.type(composer, "Explain the queue.");
+      await user.click(screen.getByRole("button", { name: "Ask Architect" }));
+
+      await screen.findByRole("alert");
+      expect(composer).toBeEnabled();
+      expect(composer).toHaveValue("Explain the queue.");
+      expect(screen.getByRole("button", { name: "Ask Architect" })).toBeEnabled();
+      expect(screen.queryByRole("button", { name: "Retry request" })).toBeNull();
+    },
+  );
+
+  it("preserves an exact turn retry for a structured unavailable response", async () => {
+    let attempts = 0;
+    const fetchBoundary = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (!init?.method) return list([]);
+      attempts += 1;
+      return attempts === 1
+        ? response(architectError("architect_unavailable"), 503)
+        : response(explanation, 201);
+    });
+    const user = userEvent.setup();
+    renderPanel(fetchBoundary);
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "Ask the Architect" }),
+      "Explain availability.",
+    );
+    await user.click(screen.getByRole("button", { name: "Ask Architect" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Architect is temporarily unavailable.",
+    );
+    await user.click(screen.getByRole("button", { name: "Retry request" }));
+
+    await waitFor(() => expect(attempts).toBe(2));
+    const requests = fetchBoundary.mock.calls
+      .filter(([, init]) => init?.method === "POST")
+      .map(([, init]) => JSON.parse(String(init?.body)));
+    expect(requests[1]).toEqual(requests[0]);
+  });
 
   it("discovers remote turns by bounded polling that outlives stale recovery", async () => {
     expect(ARCHITECT_POLL_INTERVAL_MS * ARCHITECT_MAX_POLL_ATTEMPTS)
@@ -451,6 +564,172 @@ describe("ArchitectPanel", () => {
     expect(screen.queryByText("Awaiting review")).toBeNull();
   });
 
+  it("auto-closes review when polling observes a remote terminal decision", async () => {
+    const scheduled: Array<() => void> = [];
+    let reads = 0;
+    const applied = reviewed(proposal, "applied", "Applied remotely.");
+    const fetchBoundary = vi.fn(async () => {
+      reads += 1;
+      return list(reads === 1 ? [proposal] : [applied]);
+    });
+    const user = userEvent.setup();
+    renderPanel(fetchBoundary, {
+      setTimeout: (callback) => {
+        scheduled.push(callback);
+        return callback;
+      },
+      clearTimeout: vi.fn(),
+      maxPollAttempts: 2,
+    });
+
+    const trigger = await screen.findByRole("button", { name: "Review patch" });
+    await user.click(trigger);
+    expect(screen.getByRole("dialog", { name: "Review Architect patch" }))
+      .toBeVisible();
+    await waitFor(() => expect(scheduled).toHaveLength(1));
+    await act(async () => scheduled.shift()?.());
+
+    expect(screen.queryByRole("dialog", { name: "Review Architect patch" }))
+      .toBeNull();
+    expect(screen.getByText("Applied")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Apply patch" })).toBeNull();
+    expect(fetchBoundary).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let a delayed turn response demote a terminal poll result", async () => {
+    const scheduled: Array<() => void> = [];
+    const turnResponse = deferred<Response>();
+    const applied = reviewed(proposal, "applied", "Applied remotely.");
+    let reads = 0;
+    const fetchBoundary = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method) return turnResponse.promise;
+      reads += 1;
+      return list(reads === 1 ? [] : [applied]);
+    });
+    const user = userEvent.setup();
+    renderPanel(fetchBoundary, {
+      setTimeout: (callback) => {
+        scheduled.push(callback);
+        return callback;
+      },
+      clearTimeout: vi.fn(),
+      maxPollAttempts: 2,
+    });
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "Ask the Architect" }),
+      "Add a queue.",
+    );
+    await user.click(screen.getByRole("button", { name: "Ask Architect" }));
+    await waitFor(() => expect(scheduled).toHaveLength(1));
+    await act(async () => scheduled.shift()?.());
+    expect(await screen.findByText("Applied")).toBeVisible();
+    turnResponse.resolve(response(proposal, 201));
+    await act(async () => undefined);
+
+    expect(screen.getByText("Applied")).toBeVisible();
+    expect(screen.queryByText("Awaiting review")).toBeNull();
+  });
+
+  it("does not let a delayed review response replace a remote terminal decision", async () => {
+    const scheduled: Array<() => void> = [];
+    const reviewResponse = deferred<Response>();
+    const rejected = reviewed(proposal, "rejected", "Rejected remotely.");
+    const applied = reviewed(proposal, "applied", "Applied locally.");
+    let reads = 0;
+    const fetchBoundary = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method) return reviewResponse.promise;
+      reads += 1;
+      return list(reads === 1 ? [proposal] : [rejected]);
+    });
+    const user = userEvent.setup();
+    renderPanel(fetchBoundary, {
+      setTimeout: (callback) => {
+        scheduled.push(callback);
+        return callback;
+      },
+      clearTimeout: vi.fn(),
+      maxPollAttempts: 2,
+    });
+
+    await user.click(await screen.findByRole("button", { name: "Review patch" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Review rationale" }),
+      "Apply locally.",
+    );
+    await user.click(screen.getByRole("button", { name: "Apply patch" }));
+    await waitFor(() => expect(scheduled).toHaveLength(1));
+    await act(async () => scheduled.shift()?.());
+    expect(await screen.findByText("Rejected")).toBeVisible();
+    reviewResponse.resolve(response(applied));
+    await act(async () => undefined);
+
+    expect(screen.getByText("Rejected")).toBeVisible();
+    expect(screen.queryByText("Applied")).toBeNull();
+  });
+
+  it("moves focus into review, traps Tab, closes on Escape, and restores focus", async () => {
+    const fetchBoundary = vi.fn(async () => list([proposal]));
+    const user = userEvent.setup();
+    const view = renderPanel(fetchBoundary);
+
+    const trigger = await screen.findByRole("button", { name: "Review patch" });
+    await user.click(trigger);
+    const rationale = screen.getByRole("textbox", { name: "Review rationale" });
+    await waitFor(() => expect(rationale).toHaveFocus());
+    expect(view.container).toHaveAttribute("aria-hidden", "true");
+    expect(view.container).toHaveAttribute("inert");
+
+    await user.type(rationale, "Keyboard review.");
+    const reject = screen.getByRole("button", { name: "Reject patch" });
+    act(() => reject.focus());
+    await user.tab();
+    expect(screen.getByRole("button", { name: "Close" })).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(reject).toHaveFocus();
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog", { name: "Review Architect patch" }))
+      .toBeNull();
+    expect(trigger).toHaveFocus();
+    expect(view.container).not.toHaveAttribute("aria-hidden");
+    expect(view.container).not.toHaveAttribute("inert");
+  });
+
+  it("shares the initial poll across StrictMode effect replay", async () => {
+    let activeRequests = 0;
+    let maximumActive = 0;
+    let resolveList!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      resolveList = resolve;
+    });
+    const fetchBoundary = vi.fn(async () => {
+      activeRequests += 1;
+      maximumActive = Math.max(maximumActive, activeRequests);
+      try {
+        return await pending;
+      } finally {
+        activeRequests -= 1;
+      }
+    });
+
+    render(
+      <StrictMode>
+        <ArchitectPanel
+          baseRevisionId="revision-a"
+          canReview
+          dependencies={{ fetch: fetchBoundary, maxPollAttempts: 1 }}
+          roomId="room-a"
+        />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(fetchBoundary).toHaveBeenCalled());
+    expect(fetchBoundary).toHaveBeenCalledTimes(1);
+    expect(maximumActive).toBe(1);
+    resolveList(list([]));
+    await act(async () => undefined);
+  });
+
   it("trusts only the shared error schema and hides arbitrary server detail", async () => {
     const fetchBoundary = vi.fn(async (_url: string, init?: RequestInit) =>
       init?.method
@@ -468,6 +747,9 @@ describe("ArchitectPanel", () => {
       "Architect request failed.",
     );
     expect(screen.queryByText(/RAW_SERVER_SECRET/)).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Ask the Architect" }))
+      .toBeEnabled();
+    expect(screen.getByRole("button", { name: "Ask Architect" })).toBeEnabled();
   });
 
   it("does not expose proposal review controls without a participant session", async () => {

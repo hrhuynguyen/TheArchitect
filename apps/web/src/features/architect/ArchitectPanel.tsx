@@ -61,13 +61,23 @@ const defaultClearTimeout = (timer: TimerBoundary): void =>
     timer as ReturnType<typeof globalThis.setTimeout>,
   );
 
-class PublicArchitectError extends Error {}
+class PublicArchitectError extends Error {
+  constructor(
+    message: string,
+    readonly preserveRetry = true,
+  ) {
+    super(message);
+  }
+}
 
 async function jsonBody(response: Response): Promise<unknown> {
   try {
     return await response.json();
   } catch {
-    throw new PublicArchitectError("Architect returned an invalid response.");
+    throw new PublicArchitectError(
+      "Architect returned an invalid response.",
+      response.ok || response.status >= 500,
+    );
   }
 }
 
@@ -106,15 +116,11 @@ async function checkedBody(response: Response, fallback: string) {
     const parsed = ArchitectApiErrorResponseSchema.safeParse(body);
     throw new PublicArchitectError(
       parsed.success ? publicError(parsed.data) : fallback,
+      response.status >= 500
+        || (parsed.success && parsed.data.code === "architect_unavailable"),
     );
   }
   return body;
-}
-
-function upsertTurn(turns: readonly ArchitectTurn[], next: ArchitectTurn) {
-  const index = turns.findIndex(({ id }) => id === next.id);
-  if (index < 0) return [next, ...turns];
-  return turns.map((turn, turnIndex) => turnIndex === index ? next : turn);
 }
 
 function isTerminalState(state: ArchitectTurn["state"]) {
@@ -177,40 +183,66 @@ export function ArchitectPanel({
   const [reviewRetry, setReviewRetry] = useState<ReviewRetry | null>(null);
   const [pollEpoch, setPollEpoch] = useState(0);
   const [pollingExhausted, setPollingExhausted] = useState(false);
-  const listGeneration = useRef(0);
+  const mounted = useRef(false);
+  const listInFlight = useRef<Readonly<{
+    fetchBoundary: FetchBoundary;
+    promise: Promise<void>;
+    turnsUrl: string;
+  }> | null>(null);
 
   const turnsUrl = `/api/rooms/${encodeURIComponent(roomId)}/architect/turns`;
 
   const refreshTurns = useCallback(async (showError: boolean) => {
-    const generation = ++listGeneration.current;
-    try {
-      const response = await fetchBoundary(turnsUrl, {
-        credentials: "same-origin",
-      });
-      const parsed = ArchitectTurnListSchema.safeParse(
-        await checkedBody(response, "Architect turns could not be loaded."),
-      );
-      if (!parsed.success) {
-        throw new PublicArchitectError(
-          "Architect turns returned an invalid response.",
+    const pending = listInFlight.current;
+    if (
+      pending?.fetchBoundary === fetchBoundary
+      && pending.turnsUrl === turnsUrl
+    ) {
+      return pending.promise;
+    }
+
+    let request!: NonNullable<typeof listInFlight.current>;
+    const promise = (async () => {
+      try {
+        const response = await fetchBoundary(turnsUrl, {
+          credentials: "same-origin",
+        });
+        const parsed = ArchitectTurnListSchema.safeParse(
+          await checkedBody(response, "Architect turns could not be loaded."),
         );
-      }
-      if (generation === listGeneration.current) {
+        if (!parsed.success) {
+          throw new PublicArchitectError(
+            "Architect turns returned an invalid response.",
+          );
+        }
+        if (!mounted.current || listInFlight.current !== request) return;
         setTurns((current) => mergeTurns(current, parsed.data.turns));
         if (showError) setRequestError(null);
+      } catch (error) {
+        if (
+          showError
+          && mounted.current
+          && listInFlight.current === request
+        ) {
+          setRequestError(
+            error instanceof PublicArchitectError
+              ? error.message
+              : "Architect turns could not be reached.",
+          );
+        }
+      } finally {
+        if (listInFlight.current === request) {
+          listInFlight.current = null;
+        }
       }
-    } catch (error) {
-      if (showError && generation === listGeneration.current) {
-        setRequestError(
-          error instanceof PublicArchitectError
-            ? error.message
-            : "Architect turns could not be reached.",
-        );
-      }
-    }
+    })();
+    request = { fetchBoundary, promise, turnsUrl };
+    listInFlight.current = request;
+    return promise;
   }, [fetchBoundary, turnsUrl]);
 
   useEffect(() => {
+    mounted.current = true;
     let active = true;
     let timer: TimerBoundary | null = null;
     let attempts = 0;
@@ -234,7 +266,7 @@ export function ArchitectPanel({
     void poll();
     return () => {
       active = false;
-      listGeneration.current += 1;
+      mounted.current = false;
       if (timer !== null) clearTimeoutBoundary(timer);
     };
   }, [clearTimeoutBoundary, maxPollAttempts, pollEpoch, refreshTurns, setTimeoutBoundary]);
@@ -269,11 +301,14 @@ export function ArchitectPanel({
       if (!parsed.success) {
         throw new PublicArchitectError("Architect returned an invalid response.");
       }
-      setTurns((current) => upsertTurn(current, parsed.data));
+      setTurns((current) => mergeTurns(current, [parsed.data]));
       setMessage("");
       setTurnRetry(null);
       if (pollingExhausted) setPollEpoch((value) => value + 1);
     } catch (error) {
+      if (error instanceof PublicArchitectError && !error.preserveRetry) {
+        setTurnRetry(null);
+      }
       setRequestError(
         error instanceof PublicArchitectError
           ? error.message
@@ -286,8 +321,18 @@ export function ArchitectPanel({
 
   const selectedProposal = useMemo(() => {
     const turn = turns.find(({ id }) => id === selectedProposalId);
-    return turn?.kind === "proposal" ? turn : null;
+    return turn?.kind === "proposal" && turn.state === "proposal_ready"
+      ? turn
+      : null;
   }, [selectedProposalId, turns]);
+
+  useEffect(() => {
+    if (selectedProposalId !== null && selectedProposal === null) {
+      setSelectedProposalId(null);
+      setReviewRetry((current) =>
+        current?.proposalId === selectedProposalId ? null : current);
+    }
+  }, [selectedProposal, selectedProposalId]);
 
   const review = async (
     action: ReviewAction,
@@ -346,11 +391,14 @@ export function ArchitectPanel({
       if (!parsed.success) {
         throw new PublicArchitectError("Architect returned an invalid response.");
       }
-      setTurns((current) => upsertTurn(current, parsed.data));
+      setTurns((current) => mergeTurns(current, [parsed.data]));
       setReviewRetry(null);
       setSelectedProposalId(null);
       if (pollingExhausted) setPollEpoch((value) => value + 1);
     } catch (error) {
+      if (error instanceof PublicArchitectError && !error.preserveRetry) {
+        setReviewRetry(null);
+      }
       setRequestError(
         error instanceof PublicArchitectError
           ? error.message
@@ -441,7 +489,8 @@ export function ArchitectPanel({
             {turn.state === "proposal_ready" && canReview ? (
               <Button
                 onClick={() => {
-                  setReviewRetry(null);
+                  setReviewRetry((current) =>
+                    current?.proposalId === turn.id ? current : null);
                   setSelectedProposalId(turn.id);
                 }}
                 type="button"
@@ -459,6 +508,7 @@ export function ArchitectPanel({
       {selectedProposal ? (
         <PatchReviewDialog
           busyAction={reviewBusy}
+          error={requestError}
           onApply={(input) => void review(
             "apply",
             selectedProposal.id,
@@ -474,6 +524,9 @@ export function ArchitectPanel({
           )}
           retryAction={reviewRetry?.proposalId === selectedProposal.id
             ? reviewRetry.action
+            : null}
+          retryRequest={reviewRetry?.proposalId === selectedProposal.id
+            ? reviewRetry.request
             : null}
           turn={selectedProposal}
         />

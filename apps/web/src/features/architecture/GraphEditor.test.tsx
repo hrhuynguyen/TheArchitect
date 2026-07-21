@@ -704,6 +704,7 @@ describe("GraphEditor", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Architect returned an invalid response.",
     );
+    await user.click(screen.getByRole("button", { name: "Close" }));
     expect(screen.getByRole("button", { name: "Uploads" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "HTTP-only queue" })).toBeNull();
     expect(test.doc.getMap(ARCHITECTURE_MAP_KEY).get(ARCHITECTURE_CURRENT_KEY))
