@@ -6,12 +6,13 @@
 
 **Architecture:** Use an npm-workspace monorepo with a Next.js 16 web application, a long-running Fastify/Hocuspocus server, shared Zod contracts, a deterministic infrastructure compiler, and reusable UI primitives. PostgreSQL and Prisma persist room state, Yjs snapshots, revisions, history, AI runs, and deployment jobs; OpenAI is the primary AI provider and Anthropic is the only fallback.
 
-**Tech Stack:** Node.js 20+, npm workspaces, TypeScript, Next.js 16 App Router, React, Fastify 5, Hocuspocus, Yjs, Prisma, PostgreSQL, Zod, tldraw, React Flow, OpenAI Responses API, Anthropic SDK, AWS CDK, AWS SDK v3, LocalStack, Docker Compose, Vitest, Testing Library, Playwright, and axe.
+**Tech Stack:** Node.js 22.12+, npm workspaces, TypeScript, Next.js 16 App Router, React, Fastify 5, Hocuspocus, Yjs, Prisma, PostgreSQL, Zod, tldraw, React Flow, OpenAI Responses API, Anthropic SDK, AWS CDK, AWS SDK v3, LocalStack, Docker Compose, Vitest, Testing Library, Playwright, and axe.
 
 ## Global Constraints
 
 - Use the original Guided Workspace design: persistent Sketch, Architect, and Deploy rail; warm white and graphite neutrals; restrained sage success and amber risk states.
 - Use Next.js 16 App Router. Do not restore the reference repository's stale Vite entrypoints.
+- Use Node.js 22.12 or newer. This user-approved runtime-floor update replaces the original Node 20 baseline so the project can use the current supported tldraw release and avoid an end-of-life runtime.
 - Use PostgreSQL through Prisma for durable state; live cursors remain transient Yjs awareness.
 - Use OpenAI Responses API as the default for vision and architect tools. Anthropic is the only fallback. Do not add Gemini dependencies, keys, code paths, or environment variables.
 - Keep OpenAI and Anthropic model names separately configurable; initialize both OpenAI model variables to `gpt-5.6`.
@@ -150,7 +151,7 @@ Use this root shape and commit the lockfile produced by installation:
   "private": true,
   "version": "0.1.0",
   "workspaces": ["apps/*", "packages/*"],
-  "engines": { "node": ">=20" },
+  "engines": { "node": ">=22.12.0" },
   "scripts": {
     "dev": "concurrently -n web,server \"npm run dev --workspace @architect/web\" \"npm run dev --workspace @architect/server\"",
     "build": "npm run build --workspaces --if-present",
