@@ -1,0 +1,53 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`compileIntent > snapshots representative prototype and production compilations 2`] = `
+{
+  "diagnostics": [
+    "warning:STAGE_UPGRADE_PENDING:stage-app-replica-2",
+    "warning:STAGE_UPGRADE_PENDING:stage-app-replica-3",
+    "warning:STAGE_UPGRADE_PENDING:stage-elb",
+    "warning:STAGE_UPGRADE_PENDING:stage-subnet-secondary",
+    "info:DIAGRAM_ONLY_RESOURCE:user",
+    "info:INFERRED_MINIMAL_RESOURCE:inferred-security-group",
+    "info:INFERRED_MINIMAL_RESOURCE:inferred-subnet-public",
+    "info:INFERRED_MINIMAL_RESOURCE:inferred-vpc",
+  ],
+  "pending": [
+    "stage-app-replica-2",
+    "stage-app-replica-3",
+    "stage-elb",
+    "stage-subnet-secondary",
+  ],
+  "relationships": [
+    "inferred-minimal:inferred-security-group:protects:app",
+    "stage-upgrade:inferred-security-group:protects:stage-app-replica-2",
+    "stage-upgrade:inferred-security-group:protects:stage-app-replica-3",
+    "stage-upgrade:inferred-security-group:protects:stage-elb",
+    "inferred-minimal:inferred-subnet-public:hosts:app",
+    "stage-upgrade:inferred-subnet-public:hosts:stage-app-replica-3",
+    "stage-upgrade:inferred-subnet-public:hosts:stage-elb",
+    "inferred-minimal:inferred-vpc:contains:inferred-security-group",
+    "inferred-minimal:inferred-vpc:contains:inferred-subnet-public",
+    "stage-upgrade:inferred-vpc:contains:stage-subnet-secondary",
+    "stage-upgrade:stage-elb:routes:app",
+    "stage-upgrade:stage-elb:routes:stage-app-replica-2",
+    "stage-upgrade:stage-elb:routes:stage-app-replica-3",
+    "stage-upgrade:stage-subnet-secondary:hosts:stage-app-replica-2",
+    "stage-upgrade:stage-subnet-secondary:hosts:stage-elb",
+    "stage-upgrade:user:routes:stage-elb",
+    "explicit:user:routes:app",
+  ],
+  "resources": [
+    "explicit:app:EC2",
+    "inferred-minimal:inferred-security-group:SecurityGroup",
+    "inferred-minimal:inferred-subnet-public:Subnet",
+    "inferred-minimal:inferred-vpc:VPC",
+    "stage-upgrade:stage-app-replica-2:EC2",
+    "stage-upgrade:stage-app-replica-3:EC2",
+    "stage-upgrade:stage-elb:ELB",
+    "stage-upgrade:stage-subnet-secondary:Subnet",
+    "explicit:user:External",
+  ],
+  "stage": "production",
+}
+`;

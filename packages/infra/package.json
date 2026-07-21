@@ -4,9 +4,17 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./catalog": "./src/catalog.ts",
+    "./compiler": "./src/compiler.ts",
+    "./staging": "./src/staging.ts"
   },
   "scripts": {
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@architect/contracts": "0.1.0",
+    "zod": "^4.4.3"
   }
 }
