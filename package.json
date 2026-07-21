@@ -13,6 +13,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:e2e": "playwright test",
+    "test:milestone2": "playwright test --config playwright.milestone2.config.ts",
     "db:generate": "npm run db:generate --workspace @architect/server",
     "db:migrate": "npm run db:migrate --workspace @architect/server"
   },

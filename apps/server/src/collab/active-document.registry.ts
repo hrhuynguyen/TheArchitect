@@ -45,15 +45,20 @@ export function createActiveDocumentRegistry({
       return rooms.get(roomId)?.active ?? null;
     },
 
-    activate(roomId: string, document: Y.Doc) {
+    activate(
+      roomId: string,
+      document: Y.Doc,
+      initialize: (document: Y.Doc) => Promise<void> | void = () => undefined,
+    ) {
       return enqueue(roomId, async (entry) => {
         if (entry.active && entry.active !== document) {
           throw new Error("Room already has an active document");
         }
         if (entry.handoffUpdate) {
           Y.applyUpdate(document, entry.handoffUpdate, "architect/server-handoff");
-          entry.handoffUpdate = undefined;
         }
+        await initialize(document);
+        entry.handoffUpdate = undefined;
         entry.active = document;
         let deactivated = false;
         return async () => {

@@ -140,4 +140,62 @@ describe("active document registry", () => {
     restored.destroy();
     live.destroy();
   });
+
+  it("keeps an initializing document private until activation succeeds", async () => {
+    const registry = createActiveDocumentRegistry({
+      async loadRoomDocument() {
+        return new Y.Doc();
+      },
+    });
+    const live = new Y.Doc();
+    const releaseInitialization = deferred();
+    let initializerCalled = false;
+
+    const activation = registry.activate("room-live", live, async () => {
+      initializerCalled = true;
+      await releaseInitialization.promise;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(initializerCalled).toBe(true);
+    expect(registry.active("room-live")).toBeNull();
+
+    releaseInitialization.resolve();
+    const deactivate = await activation;
+    expect(registry.active("room-live")).toBe(live);
+
+    await deactivate();
+    await registry.destroy();
+    live.destroy();
+  });
+
+  it("preserves a queued handoff when activation initialization fails", async () => {
+    const registry = createActiveDocumentRegistry({
+      async loadRoomDocument() {
+        return new Y.Doc();
+      },
+    });
+    await registry.withDocument("room-live", async (fallback) => {
+      fallback.getMap("meta").set("phase", "reconstructing");
+    });
+    const rejected = new Y.Doc();
+
+    await expect(
+      registry.activate("room-live", rejected, async (document) => {
+        expect(document.getMap("meta").get("phase")).toBe("reconstructing");
+        throw new Error("membership revoked");
+      }),
+    ).rejects.toThrow("membership revoked");
+    expect(registry.active("room-live")).toBeNull();
+
+    const replacement = new Y.Doc();
+    const deactivate = await registry.activate("room-live", replacement);
+    expect(replacement.getMap("meta").get("phase")).toBe("reconstructing");
+
+    await deactivate();
+    await registry.destroy();
+    rejected.destroy();
+    replacement.destroy();
+  });
 });

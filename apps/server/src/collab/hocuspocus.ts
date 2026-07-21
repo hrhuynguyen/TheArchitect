@@ -294,22 +294,29 @@ export function createHocuspocusServer({
     },
     async afterLoadDocument({ context, document, documentName }) {
       const authenticated = context as AuthenticationContext;
-      const currentParticipant = await database.participant.findFirst({
-        where: {
-          id: authenticated.participant.participantId,
-          roomId: documentName,
+      const deactivate = await documents.activate(
+        documentName,
+        document,
+        async (activeDocument) => {
+          const currentParticipant = await database.participant.findFirst({
+            where: {
+              id: authenticated.participant.participantId,
+              roomId: documentName,
+            },
+            select: {
+              id: true,
+              name: true,
+              color: true,
+              room: { select: { phase: true } },
+            },
+          });
+          if (!currentParticipant) throw new Error("Unauthorized");
+          activeDocument
+            .getMap("meta")
+            .set("phase", currentParticipant.room.phase);
         },
-        select: {
-          id: true,
-          name: true,
-          color: true,
-          room: { select: { phase: true } },
-        },
-      });
-      if (!currentParticipant) throw new Error("Unauthorized");
-      const deactivate = await documents.activate(documentName, document);
+      );
       deactivateDocuments.set(documentName, deactivate);
-      document.getMap("meta").set("phase", currentParticipant.room.phase);
       snapshots.track(documentName, document);
     },
     async beforeHandleMessage({ document, documentName, socketId, update }) {

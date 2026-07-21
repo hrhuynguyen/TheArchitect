@@ -827,6 +827,77 @@ describe("Hocuspocus WebSocket integration", () => {
     }
   });
 
+  it("does not overwrite a queued threshold transition with a stale pre-activation phase", async () => {
+    const memory = createCollaborationDatabase();
+    const findParticipant = memory.database.participant.findFirst.bind(
+      memory.database.participant,
+    );
+    let participantReads = 0;
+    memory.database.participant.findFirst = async (input) => {
+      participantReads += 1;
+      const participant = await findParticipant(input);
+      return participant
+        ? { ...participant, room: { ...participant.room } }
+        : null;
+    };
+    const documents = createActiveDocumentRegistry({
+      async loadRoomDocument() {
+        const document = new Y.Doc();
+        document.getMap("meta").set("phase", "sketch");
+        return document;
+      },
+    });
+    const activate = vi.spyOn(documents, "activate");
+    let releaseTransition!: () => void;
+    const transitionGate = new Promise<void>((resolve) => {
+      releaseTransition = resolve;
+    });
+    let markTransitionStarted!: () => void;
+    const transitionStarted = new Promise<void>((resolve) => {
+      markTransitionStarted = resolve;
+    });
+    const transition = documents.withDocument(roomId, async (fallback) => {
+      markTransitionStarted();
+      await transitionGate;
+      memory.participants.get(participantId)!.room.phase = "reconstructing";
+      fallback.getMap("meta").set("phase", "reconstructing");
+    });
+    await transitionStarted;
+    const collaboration = createHocuspocusServer({
+      awarenessRegistry: createAwarenessRegistry(),
+      documents,
+      env: { COOKIE_SIGNING_SECRET: secret, WS_PORT: 0 },
+      prisma: memory.database,
+    });
+    const listening = await collaboration.listen({ host: "127.0.0.1", port: 0 });
+    const restored = new Y.Doc();
+    const client = connectProvider({
+      cookie: cookieHeader(roomId),
+      document: restored,
+      url: listening.webSocketUrl,
+    });
+
+    try {
+      await eventually(() => expect(activate).toHaveBeenCalledOnce());
+      releaseTransition();
+      await transition;
+      await client.synced;
+
+      expect(participantReads).toBe(2);
+      expect(restored.getMap("meta").get("phase")).toBe("reconstructing");
+      expect(documents.active(roomId)?.getMap("meta").get("phase")).toBe(
+        "reconstructing",
+      );
+    } finally {
+      releaseTransition();
+      client.provider.destroy();
+      restored.destroy();
+      await transition;
+      await collaboration.destroy();
+      await documents.destroy();
+    }
+  });
+
   it("does not activate a document when the post-auth membership lookup fails", async () => {
     const memory = createCollaborationDatabase();
     const findParticipant = memory.database.participant.findFirst.bind(
@@ -856,7 +927,7 @@ describe("Hocuspocus WebSocket integration", () => {
     });
     try {
       await eventually(() => expect(reads).toBeGreaterThanOrEqual(2));
-      expect(activate).not.toHaveBeenCalled();
+      expect(activate).toHaveBeenCalledOnce();
       expect(documents.active(roomId)).toBeNull();
     } finally {
       client.provider.destroy();
