@@ -21,6 +21,7 @@
 - Provider execution is at-least-once after crash; exactly one revision and one deterministic reconstruction history event may commit for a transition job.
 - Do not reopen Room `sketch` after terminal failure until old readiness deletion and the sketch mirror are persisted and published.
 - Startup recovery may finish only publishing, failed-cleanup, and successful phase-mirror work; it never invokes AI without client-provided bytes.
+- Every recovery publisher, cleanup, or phase-mirror mutation conditionally claims and renews a state-specific lease/token first, uses that token as its write fence, and never steals a fresh lease.
 - Debug API and page require `ENABLE_DEBUG_ROUTES=true`, non-production, and room member/owner authorization; debug creates no durable or Yjs state.
 - Use only the existing cookie-signing secret with a domain-separated HMAC for provider safety identity.
 - Keep semantic architecture and layout separate in revisions and Yjs.
@@ -99,7 +100,7 @@ export const reconstructionProviderSchema = z.strictObject({
 });
 
 export const reconstructionRequestSchema = z.strictObject({
-  imageDataUrl: z.string().min(1).max(MAX_RECONSTRUCTION_DATA_URL_CHARS),
+  imageDataUrl: z.string().min(PNG_DATA_URL_PREFIX.length + 1).max(6_990_530),
   mimeType: z.literal("image/png"),
   requirements: RequirementsProfileSchema,
   sourceSnapshotVersion: z.number().int().nonnegative(),
@@ -113,6 +114,10 @@ export const reconstructionJobEnvelopeSchema = z.discriminatedUnion("state", [
 ```
 
 Export both lower-camel and existing project-style Pascal aliases and add the `./reconstruction` package export.
+Define `MAX_PNG_BASE64_CHARS = 6_990_508` and
+`MAX_RECONSTRUCTION_DATA_URL_CHARS = PNG_DATA_URL_PREFIX.length +
+MAX_PNG_BASE64_CHARS` (6,990,530). The contract limit includes the exact
+`data:image/png;base64,` prefix; the lower base64 ceiling does not.
 
 - [ ] **Step 4: Write failing Task 7 claim-version regressions**
 
@@ -207,7 +212,7 @@ it("fences an expired attempt after another voter reclaims it", async () => {
 });
 ```
 
-Also assert one revision/history across concurrent commits, completed AiRun without commit causing a new attempt, safe abandoned AiRun closure, heartbeat renewal, terminal replay, recoverable-state filtering, and exactly one recovery lease winner without stealing a fresh recovery owner.
+Also assert one revision/history across concurrent commits, completed AiRun without commit causing a new attempt, safe abandoned AiRun closure, heartbeat renewal, terminal replay, recoverable-state filtering, and exactly one recovery lease winner without stealing a fresh recovery owner. Assert a newly claimed running AiRun is seeded with the configured primary provider/model identity; terminal recording may replace those fields with the selected fallback identity, and no `pending`, empty, or invented identity is persisted.
 
 - [ ] **Step 2: Run the repository RED**
 
@@ -293,7 +298,8 @@ Commit: `git commit -m "feat: persist leased reconstruction jobs"`
 
 **Interfaces:**
 - Consumes: Task 9 `AiProvider`, `AiRunRecorder`, and Task 8 `compileIntent`.
-- Produces: `validateReconstructionPng(input): { imageDataUrl, digest, width, height }` and `analyzeReconstruction(input, provider, recorder): ReconstructionAnalysis`.
+- Produces: `validateReconstructionPng(input): { imageDataUrl, digest, width, height }` and `analyzeReconstruction(input, recordedProvider): ReconstructionAnalysis`, where `recordedProvider` contains an `AiProvider` already bound to exactly one supplied recorder plus a read-only terminal-metadata accessor.
+- Produces: `RecordedReconstructionProvider = { provider: AiProvider; terminal(): AiRunTerminalMetadata | null }`; no recorder argument exists on `analyzeReconstruction`.
 - Guarantees: encoded-length precheck occurs before `Buffer.from`; returned digest is hex SHA-256; no raw input exists in terminal metadata/errors.
 
 - [ ] **Step 1: Write exact PNG boundary REDs**
@@ -337,7 +343,7 @@ return Object.freeze({
 
 - [ ] **Step 4: Write pipeline REDs**
 
-Cover provider success, selected fallback metadata, blocking compiler output returned to debug, stable AI errors, missing terminal callback, and sentinel scans proving neither result nor captured logs/metadata contain the input data URL, fixed prompts, fake keys, safety identifier, or raw provider message.
+Cover provider success, selected fallback metadata, blocking compiler output returned to debug, stable AI errors, missing terminal callback, and sentinel scans proving neither result nor captured logs/metadata contain the input data URL, fixed prompts, fake keys, safety identifier, or raw provider message. Assert the pipeline never accepts a second recorder argument and rejects provider success when its single bound recorder produced no terminal metadata.
 
 - [ ] **Step 5: Run pipeline RED**
 
@@ -347,15 +353,18 @@ Expected: FAIL because the shared analysis function does not exist.
 
 - [ ] **Step 6: Implement one provider/compiler pipeline**
 
-Capture the sanitized awaited terminal record and compile validated intent:
+Read the sanitized terminal record captured by the provider's one already-bound
+recorder and compile validated intent. The analysis API has no recorder
+parameter:
 
 ```ts
-const intent = await provider.reconstruct({
+const intent = await recordedProvider.provider.reconstruct({
   traceId: input.aiTraceId,
   safetyIdentifier: input.safetyIdentifier,
   imageDataUrl: input.imageDataUrl,
 });
 const compiled = compileIntent(intent, input.requirements);
+const terminal = recordedProvider.terminal();
 if (!terminal) throw new AiRecorderError(input.aiTraceId);
 return ReconstructionAnalysisSchema.parse({
   provider: { provider: terminal.provider, model: terminal.model },
@@ -364,7 +373,9 @@ return ReconstructionAnalysisSchema.parse({
 });
 ```
 
-The provider passed to this function is the Task 9 failover provider already bound to the supplied recorder.
+`recordedProvider.provider` is the Task 9 failover provider already bound to the
+single supplied recorder. Room and debug callers construct that boundary once;
+the pipeline cannot double-record.
 
 - [ ] **Step 7: Run Task 3 GREEN and commit**
 
@@ -450,7 +461,7 @@ Expected: FAIL because the service does not exist.
 
 - [ ] **Step 6: Implement service orchestration and heartbeat**
 
-Use a cancellable interval only around running provider/compiler work, and always fence completion. Keep pre-commit analysis failure, post-commit publication failure, and lost-fence outcomes separate:
+Use a cancellable interval only around running provider/compiler work, and always fence completion. Seed the running AiRun from `provider.identity("reconstruct")` before the external call; Task 9 terminal recording replaces it only with the actual selected fallback identity. Keep pre-commit analysis failure, post-commit publication failure, and lost-fence outcomes separate:
 
 ```ts
 const heartbeat = startLeaseHeartbeat({
@@ -508,9 +519,11 @@ for (const candidate of await repository.listRecoverable(clock.now())) {
 ```
 
 `listRecoverable(now)` returns only publication/cleanup/mirror candidates whose
-lease is absent or expired. `claimRecovery` conditionally takes a new fencing
-token, so concurrent processes have one winner and cannot steal a fresh owner.
-Never include claimed or running jobs in this list.
+lease is absent or expired. Before each publisher, cleanup, or mirror mutation,
+`claimRecovery` conditionally takes the matching state-specific lease/token and
+starts the same 10-second renewal discipline; every repository completion uses
+that token as a fence. Concurrent processes have one winner and cannot steal a
+fresh owner. Never include claimed or running jobs in this list.
 
 - [ ] **Step 10: Run Task 4 GREEN and commit**
 
@@ -539,7 +552,11 @@ Commit: `git commit -m "feat: run recoverable reconstruction jobs"`
 
 - [ ] **Step 1: Write route authorization and payload REDs**
 
-Test signed member success, source voter enforcement delegated to service, owner-only GET/debug access, owner-only POST denial, missing/tampered/cross-room participant denial, cross-room job 404, malformed/oversized body, fresh 202, terminal 200, stable error mapping, and response sentinel redaction.
+Test signed member success for both GET and debug, verified owner success for
+both GET and debug, source-voter member POST success, owner-only POST denial,
+missing/tampered/cross-room participant denial, cross-room job 404,
+malformed/oversized body, fresh 202, terminal 200, stable error mapping, and
+response sentinel redaction.
 
 ```ts
 it("does not reveal a job through a different room", async () => {
