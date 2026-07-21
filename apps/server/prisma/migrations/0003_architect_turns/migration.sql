@@ -14,6 +14,8 @@ ALTER TABLE "ArchitectProposal"
   ADD COLUMN "reviewIdempotencyKey" TEXT,
   ADD COLUMN "reviewedByParticipantId" TEXT,
   ADD COLUMN "reviewRationale" TEXT,
+  ADD COLUMN "destructiveConfirmed" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN "destructiveConfirmationRationale" TEXT,
   ADD COLUMN "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   ALTER COLUMN "responseText" DROP NOT NULL,
   ALTER COLUMN "state" SET DEFAULT 'thinking';
@@ -58,8 +60,8 @@ CREATE UNIQUE INDEX "ArchitectProposal_roomId_reviewedByParticipantId_reviewIdem
   ON "ArchitectProposal"("roomId", "reviewedByParticipantId", "reviewIdempotencyKey");
 
 -- CreateIndex
-CREATE INDEX "ArchitectProposal_state_updatedAt_idx"
-  ON "ArchitectProposal"("state", "updatedAt");
+CREATE INDEX "ArchitectProposal_roomId_state_updatedAt_idx"
+  ON "ArchitectProposal"("roomId", "state", "updatedAt");
 
 -- AddForeignKey
 ALTER TABLE "ArchitectProposal"

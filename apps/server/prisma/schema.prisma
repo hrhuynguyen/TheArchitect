@@ -143,37 +143,39 @@ model AiRun {
 }
 
 model ArchitectProposal {
-  id                      String                @id @default(uuid())
-  roomId                  String
-  baseRevisionId          String
-  message                 String
-  kind                    String?
-  actorType               String
-  actorId                 String
-  idempotencyKey          String
-  sourceSnapshotVersion   Int
-  sourceProtectedDigest   String
-  sourceProtectedState    Json
-  operations              Json
-  responseText            String?
-  state                   String                @default("thinking")
-  traceId                 String                @unique
-  appliedRevisionId       String?               @unique
-  errorCode               String?
-  errorMessage            String?
-  reviewIdempotencyKey    String?
-  reviewedByParticipantId String?
-  reviewRationale         String?
-  createdAt               DateTime              @default(now())
-  updatedAt               DateTime              @updatedAt
-  reviewedAt              DateTime?
-  room                    Room                  @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  appliedRevision         ArchitectureRevision? @relation("ArchitectProposalAppliedRevision", fields: [appliedRevisionId], references: [id], onDelete: Restrict)
+  id                               String                @id @default(uuid())
+  roomId                           String
+  baseRevisionId                   String
+  message                          String
+  kind                             String?
+  actorType                        String
+  actorId                          String
+  idempotencyKey                   String
+  sourceSnapshotVersion            Int
+  sourceProtectedDigest            String
+  sourceProtectedState             Json
+  operations                       Json
+  responseText                     String?
+  state                            String                @default("thinking")
+  traceId                          String                @unique
+  appliedRevisionId                String?               @unique
+  errorCode                        String?
+  errorMessage                     String?
+  reviewIdempotencyKey             String?
+  reviewedByParticipantId          String?
+  reviewRationale                  String?
+  destructiveConfirmed             Boolean               @default(false)
+  destructiveConfirmationRationale String?
+  createdAt                        DateTime              @default(now())
+  updatedAt                        DateTime              @updatedAt
+  reviewedAt                       DateTime?
+  room                             Room                  @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  appliedRevision                  ArchitectureRevision? @relation("ArchitectProposalAppliedRevision", fields: [appliedRevisionId], references: [id], onDelete: Restrict)
 
   @@unique([roomId, actorType, actorId, idempotencyKey])
   @@unique([roomId, reviewedByParticipantId, reviewIdempotencyKey])
   @@index([roomId, createdAt])
-  @@index([state, updatedAt])
+  @@index([roomId, state, updatedAt])
 }
 
 model TransitionJob {

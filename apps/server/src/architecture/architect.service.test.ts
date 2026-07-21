@@ -23,6 +23,7 @@ import {
   type ProviderIdentity,
 } from "../ai/provider.js";
 import { createArchitectService } from "./architect.service.js";
+import { ArchitectServiceError } from "./architect.service.js";
 import { ARCHITECT_PROTOCOL } from "./architect.protocol.js";
 
 const architecture = {
@@ -114,6 +115,8 @@ class MemoryTurnRepository {
   existing = false;
   staleOnInterrupt = false;
   recorderThrows = false;
+  appliedInputs: any[] = [];
+  publicationState: typeof protectedState | null = null;
 
   interruptStaleThinking = vi.fn(async () => {
     if (this.staleOnInterrupt && this.turn?.state === "thinking") {
@@ -133,6 +136,8 @@ class MemoryTurnRepository {
     }
     return { interrupted: 0 };
   });
+
+  heartbeatThinking = vi.fn(async () => ({ kind: "renewed" as const }));
 
   createThinking = vi.fn(async (input: any) => {
     if (this.existing && this.turn) return { kind: "existing" as const, turn: this.turn };
@@ -203,6 +208,71 @@ class MemoryTurnRepository {
   );
 
   listTurns = vi.fn(async () => ({ turns: this.turn ? [this.turn] : [] }));
+
+  readProposalSource = vi.fn(async (roomId: string, proposalId: string) => {
+    if (!this.turn || this.turn.roomId !== roomId || this.turn.id !== proposalId) {
+      return null;
+    }
+    return {
+      turn: this.turn,
+      sourceProtectedState: protectedState,
+      operations: this.turn.kind === "proposal" ? this.turn.operations : [],
+    };
+  });
+
+  applyProposalRevision = vi.fn(async (input: any) => {
+    this.appliedInputs.push(input);
+    if (!this.turn) return { kind: "not_found" as const };
+    if (this.turn.state === "applied") {
+      return {
+        kind: "applied" as const,
+        idempotent: true,
+        turn: this.turn,
+        publication: { state: this.publicationState },
+      };
+    }
+    this.publicationState = input.candidateState;
+    this.turn = ArchitectTurnSchema.parse({
+      ...this.turn,
+      state: "applied",
+      appliedRevisionId: input.revisionId,
+      reviewedAt: "2026-07-21T12:01:00.000Z",
+      reviewedByParticipantId: input.participantId,
+      reviewRationale: input.rationale,
+    });
+    return {
+      kind: "applied" as const,
+      idempotent: false,
+      turn: this.turn,
+      publication: { state: this.publicationState },
+    };
+  });
+
+  rejectProposal = vi.fn(async (input: any) => {
+    if (!this.turn) return { kind: "not_found" as const };
+    if (this.turn.state === "rejected") {
+      return {
+        kind: "rejected" as const,
+        idempotent: true,
+        turn: this.turn,
+      };
+    }
+    if (this.turn.state !== "proposal_ready") {
+      return { kind: "terminal_conflict" as const, state: this.turn.state };
+    }
+    this.turn = ArchitectTurnSchema.parse({
+      ...this.turn,
+      state: "rejected",
+      reviewedAt: "2026-07-21T12:01:00.000Z",
+      reviewedByParticipantId: input.participantId,
+      reviewRationale: input.rationale,
+    });
+    return {
+      kind: "rejected" as const,
+      idempotent: false,
+      turn: this.turn,
+    };
+  });
 }
 
 function documentFixture() {
@@ -222,6 +292,10 @@ function setup(input: Readonly<{
   primaryOutput?: ArchitectProviderOutput;
   primaryError?: unknown;
   fallbackOutput?: ArchitectProviderOutput;
+  failPublishOnce?: boolean;
+  primaryPromise?: Promise<ArchitectProviderOutput>;
+  fakeHeartbeatTimers?: boolean;
+  historyPromise?: Promise<readonly any[]>;
 }> = {}) {
   const document = documentFixture();
   let documentLocked = false;
@@ -235,6 +309,7 @@ function setup(input: Readonly<{
       providerInputs.push(providerInput);
       providerProtocols.push(protocol);
       if (input.primaryError) throw input.primaryError;
+      if (input.primaryPromise) return input.primaryPromise;
       return input.primaryOutput ?? explanation;
     },
   );
@@ -245,6 +320,11 @@ function setup(input: Readonly<{
       )
     : null;
   const repository = new MemoryTurnRepository();
+  let publishFailuresRemaining = input.failPublishOnce ? 1 : 0;
+  const heartbeatCallbacks: Array<() => void> = [];
+  const clearedHeartbeatTimers: unknown[] = [];
+  const ids = ["turn-a", "revision-b", "event-revision-b", "event-proposal-a"];
+  let idIndex = 0;
   const createProvider = (recordTerminal: AiRunRecorder) =>
     createFailoverProvider(primary, fallback, { recordTerminal });
   const service = createArchitectService({
@@ -264,16 +344,35 @@ function setup(input: Readonly<{
       createProvider,
     },
     latestSnapshotVersion: async () => 7,
-    recentHistory: async () => Array.from({ length: 25 }, (_, index) => ({
-      kind: "architecture_revision_saved",
-      status: "succeeded" as const,
-      title: `Revision ${index + 1}`,
-      summary: null,
-      createdAt: `2026-07-21T11:${String(index).padStart(2, "0")}:00.000Z`,
-    })),
+    recentHistory: async () => input.historyPromise ??
+      Array.from({ length: 25 }, (_, index) => ({
+        kind: "architecture_revision_saved",
+        status: "succeeded" as const,
+        title: `Revision ${index + 1}`,
+        summary: null,
+        createdAt: `2026-07-21T11:${String(index).padStart(2, "0")}:00.000Z`,
+      })),
     safetySecret: "test-safety-secret",
-    createId: () => "turn-a",
+    createId: () => ids[idIndex++] ?? `generated-${idIndex}`,
     now: () => new Date("2026-07-21T12:00:00.000Z"),
+    applyUpdate: (target, update, origin) => {
+      if (publishFailuresRemaining > 0) {
+        publishFailuresRemaining -= 1;
+        throw new Error("publish failed");
+      }
+      Y.applyUpdate(target, update, origin);
+    },
+    ...(input.fakeHeartbeatTimers
+      ? {
+          setInterval: (callback: () => void) => {
+            heartbeatCallbacks.push(callback);
+            return 17 as never;
+          },
+          clearInterval: (timer: unknown) => {
+            clearedHeartbeatTimers.push(timer);
+          },
+        }
+      : {}),
   });
   return {
     document,
@@ -284,6 +383,8 @@ function setup(input: Readonly<{
     providerObservedLock,
     providerInputs,
     providerProtocols,
+    heartbeatCallbacks,
+    clearedHeartbeatTimers,
   };
 }
 
@@ -458,5 +559,183 @@ describe("architect service", () => {
     });
     expect(test.primary.architectCalls).toBe(1);
     expect(test.fallback?.architectCalls).toBe(0);
+  });
+
+  it("applies a reviewed SQS proposal and publishes only the committed state", async () => {
+    const test = setup({ primaryOutput: queueProposal });
+    await test.service.runTurn(runInput);
+
+    await expect(test.service.applyPatch({
+      roomId: "room-a",
+      proposalId: "turn-a",
+      participantId: "participant-a",
+      traceId: "apply-http-1",
+      request: {
+        baseRevisionId: "revision-a",
+        idempotencyKey: "apply-request-a",
+        rationale: "The queue improves failure isolation.",
+      },
+    })).resolves.toMatchObject({
+      state: "applied",
+      appliedRevisionId: "revision-b",
+    });
+    expect(test.repository.appliedInputs[0]).toMatchObject({
+      revisionId: "revision-b",
+      revisionEventId: "event-revision-b",
+      proposalEventId: "event-proposal-a",
+      traceId: "apply-http-1",
+      candidateState: {
+        architecture: {
+          architecture: {
+            resources: [
+              { id: "worker", origin: "explicit" },
+              { id: "orders-queue", origin: "inferred-minimal" },
+            ],
+          },
+        },
+      },
+    });
+    const published = test.document
+      .getMap(ARCHITECTURE_MAP_KEY)
+      .get(ARCHITECTURE_CURRENT_KEY) as any;
+    expect(published.revisionId).toBe("revision-b");
+    expect(published.architecture.resources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "orders-queue", origin: "inferred-minimal" }),
+    ]));
+  });
+
+  it("requires a participant confirmation before destructive apply", async () => {
+    const removal = {
+      kind: "proposal" as const,
+      responseText: "I can remove the order worker.",
+      operations: [{
+        type: "remove_resource" as const,
+        resourceId: "worker",
+        reason: "The worker is no longer requested.",
+      }],
+    };
+    const test = setup({ primaryOutput: removal });
+    await test.service.runTurn(runInput);
+
+    const error = await test.service.applyPatch({
+      roomId: "room-a",
+      proposalId: "turn-a",
+      participantId: "participant-a",
+      traceId: "apply-http-1",
+      request: {
+        baseRevisionId: "revision-a",
+        idempotencyKey: "apply-request-a",
+        rationale: "Remove the obsolete worker.",
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ArchitectServiceError);
+    expect(error).toMatchObject({ code: "DESTRUCTIVE_CONFIRMATION_REQUIRED" });
+    expect(test.repository.applyProposalRevision).not.toHaveBeenCalled();
+  });
+
+  it("heals post-commit publication failure on an idempotent retry", async () => {
+    const test = setup({ primaryOutput: queueProposal, failPublishOnce: true });
+    await test.service.runTurn(runInput);
+    const apply = (baseRevisionId = "revision-a") => test.service.applyPatch({
+      roomId: "room-a",
+      proposalId: "turn-a",
+      participantId: "participant-a",
+      traceId: "apply-http-1",
+      request: {
+        baseRevisionId,
+        idempotencyKey: "apply-request-a",
+        rationale: "The queue improves failure isolation.",
+      },
+    });
+
+    await expect(apply()).rejects.toThrow("publish failed");
+    expect(test.repository.turn).toMatchObject({
+      state: "applied",
+      appliedRevisionId: "revision-b",
+    });
+    expect((test.document.getMap(ARCHITECTURE_MAP_KEY)
+      .get(ARCHITECTURE_CURRENT_KEY) as any).revisionId).toBe("revision-a");
+
+    await expect(apply("changed-retry-body")).resolves.toMatchObject({
+      state: "applied",
+      appliedRevisionId: "revision-b",
+    });
+    expect((test.document.getMap(ARCHITECTURE_MAP_KEY)
+      .get(ARCHITECTURE_CURRENT_KEY) as any).revisionId).toBe("revision-b");
+    expect(test.repository.appliedInputs).toHaveLength(2);
+  });
+
+  it("interrupts stale thinking during polling without invoking a provider", async () => {
+    const test = setup({ primaryOutput: queueProposal });
+    await test.repository.createThinking({
+      id: "turn-a",
+      roomId: "room-a",
+      baseRevisionId: "revision-a",
+      message: runInput.request.message,
+      actor: runInput.actor,
+      idempotencyKey: runInput.request.idempotencyKey,
+      sourceSnapshotVersion: 7,
+      sourceProtectedDigest:
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      sourceProtectedState: protectedState,
+      traceId: "architect:turn-a",
+      primaryProvider: { provider: "openai", model: "gpt-5.2" },
+    });
+    test.repository.staleOnInterrupt = true;
+
+    await expect(test.service.listTurns("room-a")).resolves.toMatchObject({
+      turns: [{ state: "failed", error: { code: "TURN_INTERRUPTED" } }],
+    });
+    expect(test.primary.architectCalls).toBe(0);
+  });
+
+  it("heartbeats active provider work outside the document lock and clears the timer", async () => {
+    let resolveHistory!: (history: readonly any[]) => void;
+    const historyPromise = new Promise<readonly any[]>((resolve) => {
+      resolveHistory = resolve;
+    });
+    const test = setup({
+      primaryOutput: explanation,
+      historyPromise,
+      fakeHeartbeatTimers: true,
+    });
+
+    const operation = test.service.runTurn(runInput);
+    await vi.waitFor(() => expect(test.heartbeatCallbacks).toHaveLength(1));
+    expect(test.primary.architectCalls).toBe(0);
+    test.heartbeatCallbacks[0]!();
+    await vi.waitFor(() =>
+      expect(test.repository.heartbeatThinking).toHaveBeenCalledWith(
+        "room-a",
+        "turn-a",
+        "architect:turn-a",
+      )
+    );
+
+    resolveHistory([]);
+    await expect(operation).resolves.toMatchObject({ state: "answered" });
+    expect(test.providerObservedLock).toEqual([false]);
+    expect(test.clearedHeartbeatTimers).toEqual([17]);
+  });
+
+  it("rejects a proposal idempotently without mutating Yjs", async () => {
+    const test = setup({ primaryOutput: queueProposal });
+    await test.service.runTurn(runInput);
+    const before = Y.encodeStateAsUpdate(test.document);
+    const reject = () => test.service.rejectPatch({
+      roomId: "room-a",
+      proposalId: "turn-a",
+      participantId: "participant-a",
+      request: {
+        idempotencyKey: "reject-request-a",
+        rationale: "Keep the synchronous design for this release.",
+      },
+    });
+
+    await expect(reject()).resolves.toMatchObject({ state: "rejected" });
+    await expect(reject()).resolves.toMatchObject({ state: "rejected" });
+    expect(Buffer.from(Y.encodeStateAsUpdate(test.document))).toEqual(
+      Buffer.from(before),
+    );
   });
 });

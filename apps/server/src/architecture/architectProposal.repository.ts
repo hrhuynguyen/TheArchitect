@@ -1,24 +1,37 @@
 import {
+  ArchitectOperationSchema,
+  ARCHITECTURE_CURRENT_KEY,
+  ARCHITECTURE_LAYOUT_MAP_KEY,
+  ARCHITECTURE_MAP_KEY,
   ArchitectProviderOutputSchema,
   ArchitectTurnListSchema,
   ArchitectTurnSchema,
+  ArchitectureLayoutSchema,
+  ArchitectureSchema,
   ReconstructionYjsStateSchema,
+  DestructiveConfirmationSchema,
   architectTurnErrorSchema,
   type ArchitectProviderOutput,
+  type ArchitectOperation,
   type ArchitectTurn,
   type ArchitectTurnError,
+  type DestructiveConfirmation,
   type ReconstructionYjsState,
 } from "@architect/contracts";
+import { applyArchitectOperations } from "@architect/infra";
 import {
   Prisma,
   type ArchitectProposal,
   type PrismaClient,
 } from "@prisma/client";
+import { isDeepStrictEqual } from "node:util";
+import * as Y from "yjs";
 
 import type {
   AiRunTerminalMetadata,
   ProviderIdentity,
 } from "../ai/provider.js";
+import { protectedStateDigest } from "./protected-state.js";
 
 const TRANSACTION_RETRIES = 3;
 const INTERRUPTED_MESSAGE =
@@ -26,7 +39,12 @@ const INTERRUPTED_MESSAGE =
 
 type ArchitectDatabase = Pick<
   PrismaClient,
-  "$transaction" | "architectProposal"
+  | "$transaction"
+  | "architectProposal"
+  | "room"
+  | "architectureRevision"
+  | "yjsSnapshot"
+  | "historyEvent"
 >;
 
 export type ArchitectActor = Readonly<{
@@ -55,6 +73,29 @@ export type RejectProposalInput = Readonly<{
   idempotencyKey: string;
   rationale: string;
 }>;
+
+export type ApplyProposalRevisionInput = Readonly<{
+  roomId: string;
+  proposalId: string;
+  participantId: string;
+  baseRevisionId: string;
+  idempotencyKey: string;
+  rationale: string;
+  destructiveConfirmation?: DestructiveConfirmation;
+  revisionId: string;
+  revisionEventId: string;
+  proposalEventId: string;
+  traceId: string;
+  candidateState: ReconstructionYjsState;
+  snapshotPayload: Uint8Array;
+}>;
+
+class ApplyRollbackError extends Error {
+  constructor(readonly result: Readonly<{ kind: "stale_after_claim" | "proposal_lost" }>) {
+    super(result.kind);
+    this.name = "ApplyRollbackError";
+  }
+}
 
 function isRetryable(error: unknown): boolean {
   return Boolean(
@@ -94,6 +135,51 @@ function publicTurn(row: ArchitectProposal): ArchitectTurn {
     reviewedAt: row.reviewedAt?.toISOString() ?? null,
     reviewedByParticipantId: row.reviewedByParticipantId,
     reviewRationale: row.reviewRationale,
+  });
+}
+
+function sourceState(row: ArchitectProposal): ReconstructionYjsState {
+  return ReconstructionYjsStateSchema.parse(row.sourceProtectedState);
+}
+
+function proposalOperations(row: ArchitectProposal): ArchitectOperation[] {
+  return ArchitectOperationSchema.array().min(1).max(200).parse(row.operations);
+}
+
+function protectedStateFromSnapshot(
+  snapshot: Readonly<{ payload: Uint8Array }> | null,
+): ReconstructionYjsState | null {
+  if (!snapshot) return null;
+  const document = new Y.Doc();
+  try {
+    Y.applyUpdate(document, new Uint8Array(snapshot.payload));
+    return ReconstructionYjsStateSchema.parse({
+      architecture: document
+        .getMap(ARCHITECTURE_MAP_KEY)
+        .get(ARCHITECTURE_CURRENT_KEY),
+      layout: document
+        .getMap(ARCHITECTURE_LAYOUT_MAP_KEY)
+        .get(ARCHITECTURE_CURRENT_KEY),
+    });
+  } catch {
+    return null;
+  } finally {
+    document.destroy();
+  }
+}
+
+function publicationState(row: Readonly<{
+  id: string;
+  architecture: Prisma.JsonValue;
+  layout: Prisma.JsonValue;
+}>): ReconstructionYjsState {
+  return ReconstructionYjsStateSchema.parse({
+    architecture: {
+      version: "working-architecture/v1",
+      revisionId: row.id,
+      architecture: ArchitectureSchema.parse(row.architecture),
+    },
+    layout: ArchitectureLayoutSchema.parse(row.layout),
   });
 }
 
@@ -167,6 +253,8 @@ export function createArchitectProposalRepository({
           reviewIdempotencyKey: null,
           reviewedByParticipantId: null,
           reviewRationale: null,
+          destructiveConfirmed: false,
+          destructiveConfirmationRationale: null,
           createdAt,
           updatedAt: createdAt,
           reviewedAt: null,
@@ -299,11 +387,30 @@ export function createArchitectProposalRepository({
     });
   };
 
-  const interruptStaleThinking = async (cutoff: Date) =>
+  const heartbeatThinking = async (
+    roomId: string,
+    turnId: string,
+    traceId: string,
+  ) => transaction(async (client) => {
+    const running = await client.aiRun.findFirst({
+      where: { roomId, traceId, task: "architect", status: "running" },
+      select: { id: true },
+    });
+    if (!running) return { kind: "lost" } as const;
+    const heartbeat = await client.architectProposal.updateMany({
+      where: { id: turnId, roomId, traceId, state: "thinking" },
+      data: { updatedAt: now() },
+    });
+    return heartbeat.count === 1
+      ? { kind: "renewed" } as const
+      : { kind: "lost" } as const;
+  });
+
+  const interruptStaleThinking = async (roomId: string, cutoff: Date) =>
     transaction(async (client) => {
       const interruptedAt = now();
       const stale = await client.architectProposal.findMany({
-        where: { state: "thinking", updatedAt: { lte: cutoff } },
+        where: { roomId, state: "thinking", updatedAt: { lte: cutoff } },
         take: 500,
       });
       let interrupted = 0;
@@ -311,6 +418,7 @@ export function createArchitectProposalRepository({
         const failed = await client.architectProposal.updateMany({
           where: {
             id: row.id,
+            roomId,
             state: "thinking",
             updatedAt: { lte: cutoff },
           },
@@ -358,12 +466,350 @@ export function createArchitectProposalRepository({
     return row ? publicTurn(row) : null;
   };
 
+  const readProposalSource = async (roomId: string, proposalId: string) => {
+    const row = await database.architectProposal.findFirst({
+      where: { id: proposalId, roomId },
+    });
+    if (!row) return null;
+    const turn = publicTurn(row);
+    if (turn.kind !== "proposal") {
+      return Object.freeze({ turn, sourceProtectedState: null, operations: [] });
+    }
+    return Object.freeze({
+      turn,
+      sourceProtectedState: sourceState(row),
+      operations: proposalOperations(row),
+    });
+  };
+
+  const appliedPublication = async (
+    client: Pick<Prisma.TransactionClient, "architectureRevision">,
+    row: ArchitectProposal,
+    idempotent: boolean,
+  ) => {
+    if (!row.appliedRevisionId) return null;
+    const revision = await client.architectureRevision.findFirst({
+      where: { id: row.appliedRevisionId, roomId: row.roomId },
+    });
+    if (!revision) return null;
+    return Object.freeze({
+      kind: "applied" as const,
+      idempotent,
+      turn: publicTurn(row),
+      publication: Object.freeze({ state: publicationState(revision) }),
+    });
+  };
+
+  const applyProposalRevision = async (input: ApplyProposalRevisionInput) => {
+    try {
+      return await transaction(async (client) => {
+        const row = await client.architectProposal.findFirst({
+          where: { id: input.proposalId, roomId: input.roomId },
+        });
+        if (!row) return { kind: "not_found" } as const;
+
+        if (
+          row.state === "applied" &&
+          row.reviewedByParticipantId === input.participantId &&
+          row.reviewIdempotencyKey === input.idempotencyKey
+        ) {
+          return (await appliedPublication(client, row, true)) ??
+            { kind: "not_found" as const };
+        }
+        const idempotencyOwner = await client.architectProposal.findFirst({
+          where: {
+            roomId: input.roomId,
+            reviewedByParticipantId: input.participantId,
+            reviewIdempotencyKey: input.idempotencyKey,
+          },
+          select: { id: true },
+        });
+        if (idempotencyOwner && idempotencyOwner.id !== row.id) {
+          return { kind: "idempotency_conflict" } as const;
+        }
+        if (input.baseRevisionId !== row.baseRevisionId) {
+          const room = await client.room.findUnique({
+            where: { id: input.roomId },
+            select: { currentRevisionId: true },
+          });
+          return {
+            kind: "stale" as const,
+            currentRevisionId: room?.currentRevisionId ?? null,
+          };
+        }
+        const candidate = ReconstructionYjsStateSchema.safeParse(
+          input.candidateState,
+        );
+        const traceValid = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(
+          input.traceId,
+        );
+        if (!candidate.success || !traceValid) {
+          return { kind: "invalid_candidate" } as const;
+        }
+        const room = await client.room.findUnique({
+          where: { id: input.roomId },
+          select: { id: true, phase: true, currentRevisionId: true },
+        });
+        if (!room || room.phase !== "architect") {
+          return { kind: "not_found" } as const;
+        }
+        if (room.currentRevisionId !== row.baseRevisionId) {
+          return {
+            kind: "stale" as const,
+            currentRevisionId: room.currentRevisionId,
+          };
+        }
+        if (row.state !== "proposal_ready") {
+          return {
+            kind: "terminal_conflict" as const,
+            state: row.state,
+          };
+        }
+
+        const source = sourceState(row);
+        if (
+          row.sourceProtectedDigest !== protectedStateDigest(source) ||
+          source.architecture.revisionId !== row.baseRevisionId
+        ) return { kind: "invalid_candidate" } as const;
+        const operations = proposalOperations(row);
+        const destructive = operations.some((operation) =>
+          operation.type === "remove_resource" ||
+          operation.type === "remove_relationship"
+        );
+        const checked = applyArchitectOperations(
+          source.architecture.architecture,
+          operations,
+          input.destructiveConfirmation,
+        );
+        if (!checked.ok) {
+          return checked.diagnostics.some((diagnostic) =>
+              diagnostic.code === "ARCHITECT_DESTRUCTIVE_CONFIRMATION_REQUIRED"
+            )
+            ? { kind: "destructive_confirmation_required" as const }
+            : { kind: "invalid_candidate" as const };
+        }
+        const destructiveConfirmation = destructive
+          ? DestructiveConfirmationSchema.parse(input.destructiveConfirmation)
+          : null;
+        const resourceIds = new Set(
+          checked.architecture.resources.map((resource) => resource.id),
+        );
+        const expectedCandidate = ReconstructionYjsStateSchema.parse({
+          architecture: {
+            version: "working-architecture/v1",
+            revisionId: input.revisionId,
+            architecture: checked.architecture,
+          },
+          layout: {
+            ...source.layout,
+            revisionId: input.revisionId,
+            nodes: source.layout.nodes.filter((node) =>
+              resourceIds.has(node.resourceId)
+            ),
+          },
+        });
+        const candidateFromSnapshot = protectedStateFromSnapshot({
+          payload: input.snapshotPayload,
+        });
+        if (
+          !isDeepStrictEqual(candidate.data, expectedCandidate) ||
+          !isDeepStrictEqual(candidateFromSnapshot, expectedCandidate)
+        ) return { kind: "invalid_candidate" } as const;
+
+        const latestSnapshot = await client.yjsSnapshot.findFirst({
+          where: { roomId: input.roomId },
+          orderBy: { version: "desc" },
+          select: { payload: true },
+        });
+        const latestProtectedState = protectedStateFromSnapshot(latestSnapshot);
+        if (
+          !latestProtectedState ||
+          protectedStateDigest(latestProtectedState) !==
+            row.sourceProtectedDigest ||
+          !isDeepStrictEqual(latestProtectedState, source)
+        ) return { kind: "working_conflict" } as const;
+
+        const baseRevision = await client.architectureRevision.findFirst({
+          where: { id: row.baseRevisionId, roomId: input.roomId },
+          select: { id: true, stage: true },
+        });
+        if (!baseRevision) return { kind: "not_found" } as const;
+        const revisionVersion =
+          ((await client.architectureRevision.aggregate({
+            where: { roomId: input.roomId },
+            _max: { version: true },
+          }))._max.version ?? 0) + 1;
+        const snapshotVersion =
+          ((await client.yjsSnapshot.aggregate({
+            where: { roomId: input.roomId },
+            _max: { version: true },
+          }))._max.version ?? 0) + 1;
+
+        const claimed = await client.architectProposal.updateMany({
+          where: {
+            id: row.id,
+            roomId: input.roomId,
+            state: "proposal_ready",
+            appliedRevisionId: null,
+          },
+          data: { state: "applying", updatedAt: now() },
+        });
+        if (claimed.count !== 1) {
+          throw new ApplyRollbackError({ kind: "proposal_lost" });
+        }
+        const roomFenced = await client.room.updateMany({
+          where: {
+            id: input.roomId,
+            phase: "architect",
+            currentRevisionId: row.baseRevisionId,
+          },
+          data: { currentRevisionId: input.revisionId },
+        });
+        if (roomFenced.count !== 1) {
+          throw new ApplyRollbackError({ kind: "stale_after_claim" });
+        }
+
+        await client.architectureRevision.create({
+          data: {
+            id: input.revisionId,
+            roomId: input.roomId,
+            version: revisionVersion,
+            architecture: expectedCandidate.architecture
+              .architecture as Prisma.InputJsonValue,
+            layout: expectedCandidate.layout as Prisma.InputJsonValue,
+            requirements: expectedCandidate.architecture.architecture
+              .requirements as Prisma.InputJsonValue,
+            stage: baseRevision.stage,
+            authorType: "participant",
+            authorId: input.participantId,
+            rationale: input.rationale,
+          },
+        });
+        await client.historyEvent.create({
+          data: {
+            id: input.revisionEventId,
+            roomId: input.roomId,
+            kind: "architecture_revision_saved",
+            status: "succeeded",
+            actorType: "participant",
+            actorId: input.participantId,
+            title: "Architecture revision saved",
+            summary: input.rationale,
+            details: {
+              proposalId: row.id,
+              revisionId: input.revisionId,
+              baseRevisionId: row.baseRevisionId,
+              version: revisionVersion,
+            },
+            traceId: input.traceId,
+          },
+        });
+        await client.historyEvent.create({
+          data: {
+            id: input.proposalEventId,
+            roomId: input.roomId,
+            kind: "architect_proposal_applied",
+            status: "succeeded",
+            actorType: "participant",
+            actorId: input.participantId,
+            title: "Architect proposal applied",
+            summary: input.rationale,
+            details: {
+              proposalId: row.id,
+              revisionId: input.revisionId,
+              baseRevisionId: row.baseRevisionId,
+              participantId: input.participantId,
+              destructiveConfirmed: destructive,
+            },
+            traceId: input.traceId,
+          },
+        });
+        await client.yjsSnapshot.create({
+          data: {
+            roomId: input.roomId,
+            version: snapshotVersion,
+            payload: Buffer.from(input.snapshotPayload),
+            reason: `architect_proposal:${row.id}`,
+          },
+        });
+        const reviewedAt = now();
+        const applied = await client.architectProposal.updateMany({
+          where: {
+            id: row.id,
+            roomId: input.roomId,
+            state: "applying",
+            appliedRevisionId: null,
+          },
+          data: {
+            state: "applied",
+            appliedRevisionId: input.revisionId,
+            reviewIdempotencyKey: input.idempotencyKey,
+            reviewedByParticipantId: input.participantId,
+            reviewRationale: input.rationale,
+            destructiveConfirmed: destructive,
+            destructiveConfirmationRationale:
+              destructiveConfirmation?.rationale ?? null,
+            reviewedAt,
+            updatedAt: reviewedAt,
+          },
+        });
+        if (applied.count !== 1) {
+          throw new ApplyRollbackError({ kind: "proposal_lost" });
+        }
+        const terminal = await client.architectProposal.findUnique({
+          where: { id: row.id },
+        });
+        if (!terminal) throw new ApplyRollbackError({ kind: "proposal_lost" });
+        return (await appliedPublication(client, terminal, false)) ??
+          { kind: "not_found" as const };
+      });
+    } catch (error) {
+      if (!(error instanceof ApplyRollbackError)) throw error;
+      if (error.result.kind === "stale_after_claim") {
+        const room = await database.room.findUnique({
+          where: { id: input.roomId },
+          select: { currentRevisionId: true },
+        });
+        return {
+          kind: "stale" as const,
+          currentRevisionId: room?.currentRevisionId ?? null,
+        };
+      }
+      const row = await database.architectProposal.findFirst({
+        where: { id: input.proposalId, roomId: input.roomId },
+      });
+      if (
+        row?.state === "applied" &&
+        row.reviewedByParticipantId === input.participantId &&
+        row.reviewIdempotencyKey === input.idempotencyKey
+      ) {
+        return (await appliedPublication(database, row, true)) ??
+          { kind: "not_found" as const };
+      }
+      return {
+        kind: "terminal_conflict" as const,
+        state: row?.state ?? "missing",
+      };
+    }
+  };
+
   const rejectProposal = async (input: RejectProposalInput) =>
     transaction(async (client) => {
       const row = await client.architectProposal.findFirst({
         where: { id: input.proposalId, roomId: input.roomId },
       });
       if (!row) return { kind: "not_found" } as const;
+      const idempotencyOwner = await client.architectProposal.findFirst({
+        where: {
+          roomId: input.roomId,
+          reviewedByParticipantId: input.participantId,
+          reviewIdempotencyKey: input.idempotencyKey,
+        },
+        select: { id: true },
+      });
+      if (idempotencyOwner && idempotencyOwner.id !== row.id) {
+        return { kind: "idempotency_conflict" } as const;
+      }
       if (
         row.state === "rejected" &&
         row.reviewedByParticipantId === input.participantId &&
@@ -412,8 +858,11 @@ export function createArchitectProposalRepository({
     recordAiTerminal,
     completeTurn,
     failTurn,
+    heartbeatThinking,
     interruptStaleThinking,
     readTurn,
+    readProposalSource,
+    applyProposalRevision,
     listTurns,
     rejectProposal,
   });
