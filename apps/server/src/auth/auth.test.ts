@@ -1,3 +1,4 @@
+import { scryptSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   ownerCookieName,
@@ -14,6 +15,26 @@ import { signParticipant, verifyParticipant } from "./participant.js";
 
 const pepper = "p".repeat(32);
 const signingSecret = "s".repeat(32);
+const base64urlAlphabet =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+function replaceHashPart(
+  encodedHash: string,
+  part: 1 | 2,
+  replace: (encoded: string) => string,
+): string {
+  const components = encodedHash.split("$");
+  components[part] = replace(components[part]!);
+  return components.join("$");
+}
+
+function noncanonicalAlias(encoded: string): string {
+  const lastIndex = encoded.length - 1;
+  const canonicalIndex = base64urlAlphabet.indexOf(encoded[lastIndex]!);
+  expect(canonicalIndex).toBeGreaterThanOrEqual(0);
+  expect(canonicalIndex % 4).toBe(0);
+  return `${encoded.slice(0, lastIndex)}${base64urlAlphabet[canonicalIndex + 1]}`;
+}
 
 describe("owner credentials", () => {
   it("creates distinct owner tokens from 32 random bytes", () => {
@@ -57,6 +78,76 @@ describe("owner credentials", () => {
       verifyOwnerToken(token, "scrypt$bad$bad", pepper),
     ).resolves.toBe(false);
   });
+
+  it.each([1, 2] as const)(
+    "rejects invalid base64url characters in hash component %i",
+    async (part) => {
+      const token = createOwnerToken();
+      const encoded = await hashOwnerToken(token, pepper);
+      const malformed = replaceHashPart(
+        encoded,
+        part,
+        (component) => `${component}!`,
+      );
+
+      expect(
+        Buffer.from(malformed.split("$")[part]!, "base64url").equals(
+          Buffer.from(encoded.split("$")[part]!, "base64url"),
+        ),
+      ).toBe(true);
+      await expect(verifyOwnerToken(token, malformed, pepper)).resolves.toBe(
+        false,
+      );
+    },
+  );
+
+  it.each([1, 2] as const)(
+    "rejects padded base64url in hash component %i",
+    async (part) => {
+      const token = createOwnerToken();
+      const encoded = await hashOwnerToken(token, pepper);
+      const padded = replaceHashPart(
+        encoded,
+        part,
+        (component) => `${component}==`,
+      );
+
+      await expect(verifyOwnerToken(token, padded, pepper)).resolves.toBe(false);
+    },
+  );
+
+  it("rejects standard-base64 alternate encodings", async () => {
+    const token = "fixture-owner-token";
+    const salt = Buffer.alloc(16, 0xff);
+    const secret = Buffer.concat([
+      Buffer.from(token, "utf8"),
+      Buffer.from(pepper, "utf8"),
+    ]);
+    const key = scryptSync(secret, salt, 64);
+    const encoded = `scrypt$${salt.toString("base64url")}$${key.toString("base64url")}`;
+    const alternate = encoded.replaceAll("-", "+").replaceAll("_", "/");
+
+    await expect(verifyOwnerToken(token, encoded, pepper)).resolves.toBe(true);
+    await expect(verifyOwnerToken(token, alternate, pepper)).resolves.toBe(
+      false,
+    );
+  });
+
+  it.each([1, 2] as const)(
+    "rejects a noncanonical unused-bit alias in hash component %i",
+    async (part) => {
+      const token = createOwnerToken();
+      const encoded = await hashOwnerToken(token, pepper);
+      const alias = replaceHashPart(encoded, part, noncanonicalAlias);
+
+      expect(
+        Buffer.from(alias.split("$")[part]!, "base64url").equals(
+          Buffer.from(encoded.split("$")[part]!, "base64url"),
+        ),
+      ).toBe(true);
+      await expect(verifyOwnerToken(token, alias, pepper)).resolves.toBe(false);
+    },
+  );
 });
 
 describe("participant identity", () => {

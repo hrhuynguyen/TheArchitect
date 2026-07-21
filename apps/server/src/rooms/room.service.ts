@@ -3,6 +3,7 @@ import type {
   RoomMode,
   RoomPhase,
 } from "@architect/contracts";
+import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import {
   createOwnerToken,
@@ -149,6 +150,13 @@ function toRoomRecord(room: {
   };
 }
 
+function isRoomDeletionRace(error: unknown): boolean {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    (error.code === "P2003" || error.code === "P2025")
+  );
+}
+
 export const prismaRoomRepository: RoomRepository = {
   async create(input) {
     const room = await prisma.room.create({
@@ -171,15 +179,20 @@ export const prismaRoomRepository: RoomRepository = {
   },
 
   async upsertParticipant(roomId, participant) {
-    await prisma.participant.upsert({
-      where: { id: participant.id },
-      create: { ...participant, roomId },
-      update: {
-        name: participant.name,
-        color: participant.color,
-        lastSeenAt: new Date(),
-      },
-    });
+    try {
+      await prisma.participant.upsert({
+        where: { id: participant.id },
+        create: { ...participant, roomId },
+        update: {
+          name: participant.name,
+          color: participant.color,
+          lastSeenAt: new Date(),
+        },
+      });
+    } catch (error) {
+      if (isRoomDeletionRace(error)) return null;
+      throw error;
+    }
     const room = await prisma.room.findUnique({
       where: { id: roomId },
       include: { participants: { orderBy: { joinedAt: "asc" } } },

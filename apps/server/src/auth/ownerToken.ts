@@ -4,6 +4,7 @@ const SALT_BYTES = 16;
 const TOKEN_BYTES = 32;
 const KEY_BYTES = 64;
 const HASH_PREFIX = "scrypt";
+const BASE64URL = /^[A-Za-z0-9_-]+$/;
 
 function deriveKey(token: string, salt: Buffer, pepper: string) {
   return new Promise<Buffer>((resolve, reject) => {
@@ -21,6 +22,23 @@ function deriveKey(token: string, salt: Buffer, pepper: string) {
       resolve(key);
     });
   });
+}
+
+function decodeCanonicalBase64Url(
+  encoded: string,
+  expectedBytes: number,
+): Buffer | null {
+  if (!BASE64URL.test(encoded)) return null;
+
+  const decoded = Buffer.from(encoded, "base64url");
+  if (
+    decoded.length !== expectedBytes ||
+    decoded.toString("base64url") !== encoded
+  ) {
+    return null;
+  }
+
+  return decoded;
 }
 
 export function createOwnerToken(): string {
@@ -52,11 +70,9 @@ export async function verifyOwnerToken(
     return false;
   }
 
-  const salt = Buffer.from(encodedSalt, "base64url");
-  const expectedKey = Buffer.from(encodedKey, "base64url");
-  if (salt.length !== SALT_BYTES || expectedKey.length !== KEY_BYTES) {
-    return false;
-  }
+  const salt = decodeCanonicalBase64Url(encodedSalt, SALT_BYTES);
+  const expectedKey = decodeCanonicalBase64Url(encodedKey, KEY_BYTES);
+  if (!salt || !expectedKey) return false;
 
   try {
     const actualKey = await deriveKey(token, salt, pepper);
