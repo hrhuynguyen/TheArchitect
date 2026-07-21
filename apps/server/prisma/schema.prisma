@@ -91,20 +91,21 @@ model YjsSnapshot {
 }
 
 model ArchitectureRevision {
-  id            String         @id @default(uuid())
-  roomId        String
-  version       Int
-  architecture  Json
-  layout        Json
-  requirements  Json
-  stage         String
-  authorType    String
-  authorId      String?
-  rationale     String
-  createdAt     DateTime       @default(now())
-  room          Room           @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  deployJobs    DeployJob[]
-  transitionJob TransitionJob? @relation("TransitionJobArchitectureRevision")
+  id                String             @id @default(uuid())
+  roomId            String
+  version           Int
+  architecture      Json
+  layout            Json
+  requirements      Json
+  stage             String
+  authorType        String
+  authorId          String?
+  rationale         String
+  createdAt         DateTime           @default(now())
+  room              Room               @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  deployJobs        DeployJob[]
+  transitionJob     TransitionJob?     @relation("TransitionJobArchitectureRevision")
+  architectProposal ArchitectProposal? @relation("ArchitectProposalAppliedRevision")
 
   @@unique([roomId, version])
 }
@@ -142,18 +143,37 @@ model AiRun {
 }
 
 model ArchitectProposal {
-  id             String    @id @default(uuid())
-  roomId         String
-  baseRevisionId String
-  operations     Json
-  responseText   String
-  state          String    @default("proposal_ready")
-  traceId        String    @unique
-  createdAt      DateTime  @default(now())
-  reviewedAt     DateTime?
-  room           Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  id                      String                @id @default(uuid())
+  roomId                  String
+  baseRevisionId          String
+  message                 String
+  kind                    String?
+  actorType               String
+  actorId                 String
+  idempotencyKey          String
+  sourceSnapshotVersion   Int
+  sourceProtectedDigest   String
+  sourceProtectedState    Json
+  operations              Json
+  responseText            String?
+  state                   String                @default("thinking")
+  traceId                 String                @unique
+  appliedRevisionId       String?               @unique
+  errorCode               String?
+  errorMessage            String?
+  reviewIdempotencyKey    String?
+  reviewedByParticipantId String?
+  reviewRationale         String?
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+  reviewedAt              DateTime?
+  room                    Room                  @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  appliedRevision         ArchitectureRevision? @relation("ArchitectProposalAppliedRevision", fields: [appliedRevisionId], references: [id], onDelete: Restrict)
 
+  @@unique([roomId, actorType, actorId, idempotencyKey])
+  @@unique([roomId, reviewedByParticipantId, reviewIdempotencyKey])
   @@index([roomId, createdAt])
+  @@index([state, updatedAt])
 }
 
 model TransitionJob {

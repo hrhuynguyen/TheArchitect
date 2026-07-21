@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./architect": "./src/architect.ts",
     "./architecture": "./src/architecture.ts",
     "./collaboration": "./src/collaboration.ts",
     "./history": "./src/history.ts",
