@@ -7,7 +7,14 @@ import type {
   RoomSummary,
 } from "@architect/contracts";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
-import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent,
+} from "react";
 import { createTLStore, Tldraw, type Editor, type TLStore } from "tldraw";
 import "tldraw/tldraw.css";
 import { createRoomCollab } from "../workspace/collab";
@@ -84,6 +91,7 @@ function ConnectedWhiteboard({
     [cursor, localParticipant.color, localParticipant.id, localParticipant.name],
   );
   const profiles = usePresence({ profile: identity, provider });
+  const getEditor = useCallback(() => editorRef.current, []);
 
   useEffect(() => {
     const publisher = createBoundedCursorPublisher({
@@ -249,6 +257,7 @@ function ConnectedWhiteboard({
       <aside className="sketch-sidebar" aria-label="Sketch decisions">
         <ReadinessVote
           doc={doc}
+          getEditor={getEditor}
           onPhaseChange={onPhaseChange}
           participantId={localParticipant.id}
           phase={room.phase}

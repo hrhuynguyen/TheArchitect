@@ -12,17 +12,22 @@ const mocks = vi.hoisted(() => ({
   createRoomCollab: vi.fn(),
   createTLStore: vi.fn(),
   createTldrawBinding: vi.fn(),
+  editor: { id: "editor-a" },
+  readinessProps: vi.fn(),
   storeDispose: vi.fn(),
   usePresence: vi.fn(),
 }));
 
 vi.mock("tldraw", () => ({
   createTLStore: mocks.createTLStore,
-  Tldraw: () => (
-    <div data-testid="tldraw-editor" onPointerMove={(event) => event.stopPropagation()}>
-      Drawing editor
-    </div>
-  ),
+  Tldraw: ({ onMount }: { onMount?: (editor: unknown) => void }) => {
+    onMount?.(mocks.editor);
+    return (
+      <div data-testid="tldraw-editor" onPointerMove={(event) => event.stopPropagation()}>
+        Drawing editor
+      </div>
+    );
+  },
 }));
 
 vi.mock("../workspace/collab", () => ({
@@ -35,6 +40,13 @@ vi.mock("../workspace/usePresence", () => ({
 
 vi.mock("./tldrawBinding", () => ({
   createTldrawBinding: mocks.createTldrawBinding,
+}));
+
+vi.mock("./ReadinessVote", () => ({
+  ReadinessVote: (props: unknown) => {
+    mocks.readinessProps(props);
+    return <section aria-label="Team readiness">Readiness</section>;
+  },
 }));
 
 import { Whiteboard } from "./Whiteboard";
@@ -119,6 +131,10 @@ describe("Whiteboard", () => {
     expect(mocks.createTldrawBinding).toHaveBeenCalledWith(
       expect.objectContaining({ doc, store: expect.anything() }),
     );
+    const readiness = mocks.readinessProps.mock.calls.at(-1)?.[0] as {
+      getEditor(): unknown;
+    };
+    expect(readiness.getEditor()).toBe(mocks.editor);
 
     view.unmount();
     expect(mocks.bindingDestroy).toHaveBeenCalledOnce();

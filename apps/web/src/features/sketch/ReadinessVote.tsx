@@ -11,15 +11,20 @@ import {
   type VoteSnapshot,
 } from "@architect/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { Editor } from "tldraw";
 import type * as Y from "yjs";
+import { useReconstruction } from "./useReconstruction";
 
 type ReadinessVoteProps = {
   doc: Y.Doc;
+  getEditor?: () => Editor | null;
   onPhaseChange?: (phase: RoomPhase) => void;
   participantId: string;
   phase: RoomPhase;
   roomId: string;
 };
+
+const NO_EDITOR = () => null;
 
 type VoteAction = "POST" | "DELETE";
 
@@ -40,6 +45,7 @@ function publicMessage(input: unknown): string | null {
 
 export function ReadinessVote({
   doc,
+  getEditor = NO_EDITOR,
   onPhaseChange,
   participantId,
   phase,
@@ -69,10 +75,22 @@ export function ReadinessVote({
     null,
   );
   const lastActionRef = useRef<VoteAction>("POST");
+  const reconstruction = useReconstruction({
+    doc,
+    getEditor,
+    onPhaseChange,
+    roomId,
+  });
 
   useEffect(() => {
     setConfirmedPhase(phase);
   }, [phase]);
+
+  useEffect(() => {
+    if (confirmedPhase === "reconstructing") {
+      void reconstruction.discover();
+    }
+  }, [confirmedPhase, reconstruction.discover]);
 
   const confirmDurablePhase: () => Promise<void> = useCallback(async () => {
     if (confirmingRef.current || !activeRef.current) return;
@@ -176,6 +194,7 @@ export function ReadinessVote({
         setValidationError(null);
         setConfirmedPhase(result.phase);
         if (result.phase !== "sketch") onPhaseChange?.(result.phase);
+        if (result.transition) void reconstruction.begin(result.transition);
       } catch (error) {
         if (activeRef.current) {
           setRequestError(
@@ -189,7 +208,7 @@ export function ReadinessVote({
         if (activeRef.current) setPending(false);
       }
     },
-    [confirmedPhase, onPhaseChange, roomId],
+    [confirmedPhase, onPhaseChange, reconstruction.begin, roomId],
   );
 
   const voted = snapshot.voterIds.includes(participantId);
@@ -236,6 +255,31 @@ export function ReadinessVote({
         </div>
       ) : null}
       {pending ? <p role="status">Submitting readiness…</p> : null}
+      {reconstruction.state.status === "capturing" ? (
+        <p role="status">Capturing the shared sketch…</p>
+      ) : null}
+      {reconstruction.state.status === "submitting" ||
+      reconstruction.state.status === "polling" ? (
+        <p role="status">Reconstructing the architecture…</p>
+      ) : null}
+      {reconstruction.state.status === "error" ? (
+        <div className="readiness-vote__error">
+          <p role="alert">{reconstruction.state.message}</p>
+          <button onClick={() => void reconstruction.retry()} type="button">
+            Retry reconstruction
+          </button>
+        </div>
+      ) : null}
+      {reconstruction.state.status === "failed" ? (
+        <p className="readiness-vote__error" role="alert">
+          {reconstruction.state.error.message}
+        </p>
+      ) : null}
+      {reconstruction.state.status === "succeeded" ? (
+        <p className="readiness-vote__success" role="status">
+          Architecture reconstruction completed.
+        </p>
+      ) : null}
       {confirmedPhase !== "sketch" ? (
         <p className="readiness-vote__success" role="status">
           Consensus reached. Reconstruction is starting.

@@ -11,6 +11,18 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as Y from "yjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const reconstruction = vi.hoisted(() => ({
+  begin: vi.fn().mockResolvedValue(undefined),
+  discover: vi.fn().mockResolvedValue(undefined),
+  retry: vi.fn().mockResolvedValue(undefined),
+  state: { status: "idle" as const },
+}));
+
+vi.mock("./useReconstruction.js", () => ({
+  useReconstruction: () => reconstruction,
+}));
+
 import { ReadinessVote } from "./ReadinessVote.js";
 
 const room: RoomSummary = {
@@ -52,6 +64,9 @@ function deferred<T>() {
 
 afterEach(() => {
   cleanup();
+  reconstruction.begin.mockClear();
+  reconstruction.discover.mockClear();
+  reconstruction.retry.mockClear();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -470,7 +485,26 @@ describe("ReadinessVote", () => {
 
     await user.click(screen.getByRole("button", { name: "I’m ready" }));
     expect(onPhaseChange).toHaveBeenCalledWith("reconstructing");
+    expect(reconstruction.begin).toHaveBeenCalledWith({
+      claimed: true,
+      jobId: "job-a",
+      sourceSnapshotVersion: 1,
+    });
     expect(screen.getByText("Consensus reached. Reconstruction is starting.")).toBeVisible();
+    doc.destroy();
+  });
+
+  it("discovers durable work when mounted in reconstructing phase", async () => {
+    const doc = new Y.Doc();
+    render(
+      <ReadinessVote
+        doc={doc}
+        participantId="participant-a"
+        phase="reconstructing"
+        roomId={room.id}
+      />,
+    );
+    await vi.waitFor(() => expect(reconstruction.discover).toHaveBeenCalledOnce());
     doc.destroy();
   });
 
