@@ -3,6 +3,7 @@
 import "@testing-library/jest-dom/vitest";
 import { defaultRequirementsProfile } from "@architect/contracts";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { StrictMode } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DebugBench } from "./DebugBench.js";
@@ -54,6 +55,27 @@ afterEach(() => {
 });
 
 describe("DebugBench", () => {
+  it("completes a diagnostic after StrictMode replays its mount effect", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response(result)));
+    const user = userEvent.setup();
+    render(
+      <StrictMode>
+        <DebugBench />
+      </StrictMode>,
+    );
+    await user.type(screen.getByRole("textbox", { name: "Room ID" }), "room-a");
+    await user.upload(
+      screen.getByLabelText("PNG sketch"),
+      new File([IMAGE_BYTES], "sketch.png", { type: "image/png" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Analyze sketch" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Semantic graph" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Analyze sketch" })).toBeEnabled();
+  });
+
   it("offers only room, PNG, and workload controls with no sensitive override surface", () => {
     const { container } = render(<DebugBench />);
     expect(screen.getByRole("textbox", { name: "Room ID" })).toBeVisible();

@@ -1,4 +1,8 @@
-import { SERVER_VOTES_MAP_KEY } from "@architect/contracts";
+import {
+  ARCHITECTURE_LAYOUT_MAP_KEY,
+  ARCHITECTURE_MAP_KEY,
+  SERVER_VOTES_MAP_KEY,
+} from "@architect/contracts";
 import { isDeepStrictEqual } from "node:util";
 import * as Y from "yjs";
 
@@ -22,14 +26,19 @@ function taggedValue(value: unknown): unknown {
 
 function protectedStateFingerprint(document: Y.Doc) {
   const meta = document.getMap("meta");
+  const entries = (mapName: string) => [...document.getMap(mapName).entries()]
+    .map(([key, value]) => [key, taggedValue(value)] as const)
+    .sort(([left], [right]) => left.localeCompare(right));
   return {
+    architecture: entries(ARCHITECTURE_MAP_KEY),
+    architectureLayout: entries(ARCHITECTURE_LAYOUT_MAP_KEY),
     phase: {
       present: meta.has("phase"),
       value: taggedValue(meta.get("phase")),
     },
-    votes: [...document.getMap(SERVER_VOTES_MAP_KEY).entries()]
-      .map(([key, value]) => [key, taggedValue(value)] as const)
-      .sort(([left], [right]) => left.localeCompare(right)),
+    requirements:
+      meta.get("phase") === "reconstructing" ? entries("requirements") : null,
+    votes: entries(SERVER_VOTES_MAP_KEY),
   };
 }
 

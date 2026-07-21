@@ -1,4 +1,10 @@
-import { READINESS_THRESHOLD, SERVER_VOTES_MAP_KEY } from "@architect/contracts";
+import {
+  ARCHITECTURE_CURRENT_KEY,
+  ARCHITECTURE_LAYOUT_MAP_KEY,
+  ARCHITECTURE_MAP_KEY,
+  READINESS_THRESHOLD,
+  SERVER_VOTES_MAP_KEY,
+} from "@architect/contracts";
 import * as Y from "yjs";
 import { describe, expect, it } from "vitest";
 import { assertClientDocumentUpdateAllowed } from "./protected-document.js";
@@ -112,6 +118,72 @@ describe("protected server document state", () => {
     ).not.toThrow();
 
     ordinaryClient.destroy();
+    client.destroy();
+    server.destroy();
+  });
+
+  it("rejects client overwrites of canonical architecture and layout", () => {
+    const server = new Y.Doc();
+    server.getMap(ARCHITECTURE_MAP_KEY).set(ARCHITECTURE_CURRENT_KEY, {
+      revisionId: "revision-server",
+      version: "working-architecture/v1",
+    });
+    server.getMap(ARCHITECTURE_LAYOUT_MAP_KEY).set(ARCHITECTURE_CURRENT_KEY, {
+      revisionId: "revision-server",
+      version: "architecture-layout/v1",
+      nodes: [],
+    });
+    const before = Y.encodeStateVector(server);
+    const client = clientBasedOn(server);
+    client.transact(() => {
+      client.getMap(ARCHITECTURE_MAP_KEY).set(ARCHITECTURE_CURRENT_KEY, {
+        revisionId: "revision-forged",
+        version: "working-architecture/v1",
+      });
+      client.getMap(ARCHITECTURE_LAYOUT_MAP_KEY).set(ARCHITECTURE_CURRENT_KEY, {
+        revisionId: "revision-forged",
+        version: "architecture-layout/v1",
+        nodes: [{ resourceId: "forged", x: 0, y: 0 }],
+      });
+    });
+    const forged = Y.encodeStateAsUpdate(client, before);
+
+    expect(() => assertClientDocumentUpdateAllowed(server, forged)).toThrow(
+      "Server-owned document state cannot be changed by clients",
+    );
+
+    client.destroy();
+    server.destroy();
+  });
+
+  it("rejects requirement changes while reconstruction is in progress", () => {
+    const server = new Y.Doc();
+    server.getMap("meta").set("phase", "reconstructing");
+    server.getMap("requirements").set("current", { traffic: "high" });
+    const before = Y.encodeStateVector(server);
+    const client = clientBasedOn(server);
+    client.getMap("requirements").set("current", { traffic: "extreme" });
+    const forged = Y.encodeStateAsUpdate(client, before);
+
+    expect(() => assertClientDocumentUpdateAllowed(server, forged)).toThrow(
+      "Server-owned document state cannot be changed by clients",
+    );
+
+    client.destroy();
+    server.destroy();
+  });
+
+  it("allows shared requirement changes during the sketch phase", () => {
+    const server = new Y.Doc();
+    server.getMap("meta").set("phase", "sketch");
+    server.getMap("requirements").set("current", { traffic: "high" });
+    const before = Y.encodeStateVector(server);
+    const client = clientBasedOn(server);
+    client.getMap("requirements").set("current", { traffic: "extreme" });
+    const ordinary = Y.encodeStateAsUpdate(client, before);
+
+    expect(() => assertClientDocumentUpdateAllowed(server, ordinary)).not.toThrow();
+
     client.destroy();
     server.destroy();
   });

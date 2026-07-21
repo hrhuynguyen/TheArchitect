@@ -333,10 +333,13 @@ export function useReconstruction({
     return claim ? begin(claim) : discover();
   }, [begin, discover]);
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    activeRef.current?.controller.abort();
-    activeRef.current = null;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      activeRef.current?.controller.abort();
+      activeRef.current = null;
+    };
   }, []);
 
   return Object.freeze({ begin, discover, retry, state });

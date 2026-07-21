@@ -9,6 +9,9 @@ import {
 } from "@architect/contracts";
 import * as Y from "yjs";
 import type { ActiveDocumentRegistry } from "../collab/active-document.registry.js";
+import type { SnapshotLeaseFence } from "../collab/yjs.repository.js";
+
+type PublicationLease = Readonly<{ jobId: string; token: string }>;
 
 type ReconstructionPublisherOptions = Readonly<{
   documents: ActiveDocumentRegistry;
@@ -16,6 +19,7 @@ type ReconstructionPublisherOptions = Readonly<{
     roomId: string,
     document: Y.Doc,
     reason: string,
+    fence: SnapshotLeaseFence,
   ): Promise<number>;
   applyUpdate?: typeof Y.applyUpdate;
 }>;
@@ -35,12 +39,13 @@ export function createReconstructionPublisher({
     roomId: string,
     reason: string,
     origin: string,
+    fence: SnapshotLeaseFence,
     operation: (candidate: Y.Doc) => void,
   ) => documents.withDocument(roomId, async (live) => {
     const candidate = cloneDocument(live);
     try {
       operation(candidate);
-      await persistRoomSnapshot(roomId, candidate, reason);
+      await persistRoomSnapshot(roomId, candidate, reason, fence);
       const delta = Y.encodeStateAsUpdate(candidate, Y.encodeStateVector(live));
       applyUpdate(live, delta, origin);
     } finally {
@@ -53,6 +58,7 @@ export function createReconstructionPublisher({
     revisionId: string;
     architecture: Architecture;
     layout: ArchitectureLayout;
+    lease: PublicationLease;
   }>) => {
     const state = ReconstructionYjsStateSchema.parse({
       architecture: {
@@ -66,6 +72,7 @@ export function createReconstructionPublisher({
       input.roomId,
       "reconstruction_architecture",
       "architect/server-reconstruction",
+      { ...input.lease, expectedState: "publishing" },
       (candidate) => {
         candidate
           .getMap(ARCHITECTURE_MAP_KEY)
@@ -77,11 +84,15 @@ export function createReconstructionPublisher({
     );
   };
 
-  const publishFailureCleanup = async (input: Readonly<{ roomId: string }>) => {
+  const publishFailureCleanup = async (input: Readonly<{
+    roomId: string;
+    lease: PublicationLease;
+  }>) => {
     await mutate(
       input.roomId,
       "reconstruction_failure_cleanup",
       "architect/server-reconstruction-failure",
+      { ...input.lease, expectedState: "failed" },
       (candidate) => {
         candidate.getMap(SERVER_VOTES_MAP_KEY).delete("ready");
         candidate.getMap("meta").set("phase", "sketch");
@@ -89,11 +100,15 @@ export function createReconstructionPublisher({
     );
   };
 
-  const publishArchitectPhase = async (input: Readonly<{ roomId: string }>) => {
+  const publishArchitectPhase = async (input: Readonly<{
+    roomId: string;
+    lease: PublicationLease;
+  }>) => {
     await mutate(
       input.roomId,
       "reconstruction_phase_mirror",
       "architect/server-reconstruction-phase",
+      { ...input.lease, expectedState: "succeeded" },
       (candidate) => {
         candidate.getMap("meta").set("phase", "architect");
       },

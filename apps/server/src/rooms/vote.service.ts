@@ -54,6 +54,7 @@ export type VoteDatabase = {
   transitionJob: {
     findFirst(input: {
       where: { roomId: string; kind: "ready" };
+      orderBy: { sourceRevision: "desc" };
     }): Promise<TransitionJobRecord | null>;
     findUnique(input: {
       where: {
@@ -192,6 +193,7 @@ export function createVoteService({
       if (error instanceof PhaseAlreadyTransitioned) {
         const existing = await database.transitionJob.findFirst({
           where: { roomId, kind },
+          orderBy: { sourceRevision: "desc" },
         });
         if (existing) {
           return {
@@ -324,6 +326,7 @@ export function createVoteService({
         ) {
           const existing = await database.transitionJob.findFirst({
             where: { roomId, kind: "ready" },
+            orderBy: { sourceRevision: "desc" },
           });
           if (existing) {
             return VoteMutationResponseSchema.parse({

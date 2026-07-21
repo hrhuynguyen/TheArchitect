@@ -2,6 +2,7 @@
 
 import { defaultRequirementsProfile } from "@architect/contracts";
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import * as Y from "yjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useReconstruction } from "./useReconstruction.js";
@@ -21,6 +22,7 @@ const running = {
   result: null,
   error: null,
 };
+const publishing = { ...running, state: "publishing" as const };
 const failed = {
   jobId: "job-a",
   sourceSnapshotVersion: 7,
@@ -77,7 +79,7 @@ function response(body: unknown, status = 200) {
   }));
 }
 
-function setup(overrides: Record<string, unknown> = {}) {
+function setup(overrides: Record<string, unknown> = {}, strict = false) {
   const doc = new Y.Doc();
   doc.getMap("requirements").set("current", requirements);
   const capture = vi.fn(async () => ({
@@ -89,20 +91,23 @@ function setup(overrides: Record<string, unknown> = {}) {
     response(failed));
   const onPhaseChange = vi.fn();
   const onCaptureReleased = vi.fn();
-  const hook = renderHook(() => useReconstruction({
-    doc,
-    getEditor: () => ({}) as never,
-    roomId: "room-a",
-    onPhaseChange,
-    dependencies: {
-      capture,
-      fetch,
-      pollDelaysMs: [0],
-      sleep: async () => undefined,
-      onCaptureReleased,
-      ...overrides,
-    },
-  }));
+  const hook = renderHook(
+    () => useReconstruction({
+      doc,
+      getEditor: () => ({}) as never,
+      roomId: "room-a",
+      onPhaseChange,
+      dependencies: {
+        capture,
+        fetch,
+        pollDelaysMs: [0],
+        sleep: async () => undefined,
+        onCaptureReleased,
+        ...overrides,
+      },
+    }),
+    strict ? { wrapper: StrictMode } : undefined,
+  );
   return { capture, doc, fetch, hook, onCaptureReleased, onPhaseChange };
 }
 
@@ -111,6 +116,15 @@ afterEach(() => {
 });
 
 describe("useReconstruction", () => {
+  it("remains active after StrictMode replays its mount effect", async () => {
+    const test = setup({}, true);
+
+    await act(async () => { await test.hook.result.current.begin(claim); });
+
+    expect(test.hook.result.current.state).toMatchObject({ status: "failed" });
+    test.doc.destroy();
+  });
+
   it("deduplicates double begin, captures once, and submits the exact claim version", async () => {
     const test = setup();
     await act(async () => {
@@ -151,6 +165,20 @@ describe("useReconstruction", () => {
     );
     expect(test.hook.result.current.state).toMatchObject({ status: "succeeded" });
     expect(test.onPhaseChange).toHaveBeenCalledWith("architect");
+    test.doc.destroy();
+  });
+
+  it("keeps cleanup-pending publication in-flight without reopening sketch", async () => {
+    const fetch = vi.fn(async () => response(publishing, 202));
+    const test = setup({ fetch, maxPollAttempts: 1 });
+
+    await act(async () => { await test.hook.result.current.begin(claim); });
+
+    expect(test.hook.result.current.state).toMatchObject({
+      status: "error",
+      message: "Reconstruction is taking longer than expected.",
+    });
+    expect(test.onPhaseChange).not.toHaveBeenCalled();
     test.doc.destroy();
   });
 

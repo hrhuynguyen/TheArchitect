@@ -9,6 +9,13 @@ import {
 function createMemoryDatabase() {
   const snapshots: SnapshotRecord[] = [];
   let createFailure: unknown;
+  let lease = {
+    id: "job-a",
+    roomId: "room-a",
+    state: "publishing",
+    leaseToken: "lease-current",
+    leaseExpiresAt: new Date("2026-07-21T12:01:00.000Z"),
+  };
 
   const database: SnapshotDatabase = {
     yjsSnapshot: {
@@ -48,6 +55,17 @@ function createMemoryDatabase() {
         return snapshot;
       },
     },
+    transitionJob: {
+      async findFirst({ where }: any) {
+        return lease.id === where.id &&
+            lease.roomId === where.roomId &&
+            lease.state === where.state &&
+            lease.leaseToken === where.leaseToken &&
+            lease.leaseExpiresAt > where.leaseExpiresAt.gt
+          ? { id: lease.id }
+          : null;
+      },
+    },
     async $transaction(callback) {
       return callback(database);
     },
@@ -56,6 +74,9 @@ function createMemoryDatabase() {
   return {
     database,
     snapshots,
+    setLease(value: typeof lease) {
+      lease = value;
+    },
     failCreatesWith(error: unknown) {
       createFailure = error;
     },
@@ -160,5 +181,37 @@ describe("Yjs snapshot repository", () => {
       ),
     ).rejects.toBe(failure);
     expect(memory.snapshots).toHaveLength(0);
+  });
+
+  it("atomically rejects a stale reconstruction lease before inserting a snapshot", async () => {
+    const memory = createMemoryDatabase();
+    const repository = createYjsRepository(memory.database, {
+      now: () => new Date("2026-07-21T12:00:00.000Z"),
+    });
+    const document = documentWithPhase("architect");
+
+    await expect(repository.persistRoomSnapshot(
+      "room-a",
+      document,
+      "reconstruction_architecture",
+      {
+        jobId: "job-a",
+        token: "lease-stale",
+        expectedState: "publishing",
+      },
+    )).rejects.toThrow("Reconstruction snapshot lease was lost");
+    expect(memory.snapshots).toHaveLength(0);
+
+    await expect(repository.persistRoomSnapshot(
+      "room-a",
+      document,
+      "reconstruction_architecture",
+      {
+        jobId: "job-a",
+        token: "lease-current",
+        expectedState: "publishing",
+      },
+    )).resolves.toBe(1);
+    expect(memory.snapshots).toHaveLength(1);
   });
 });

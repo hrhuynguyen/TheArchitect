@@ -173,6 +173,17 @@ export function createReconstructionRepository({
     return job ? publicJob(job) : null;
   };
 
+  const readBySource = async (roomId: string, sourceSnapshotVersion: number) => {
+    const job = await database.transitionJob.findFirst({
+      where: {
+        roomId,
+        sourceRevision: sourceSnapshotVersion,
+        kind: "ready",
+      },
+    });
+    return job ? publicJob(job) : null;
+  };
+
   const readPublication = async (jobId: string) => {
     const job = await database.transitionJob.findFirst({
       where: {
@@ -598,6 +609,7 @@ export function createReconstructionRepository({
 
   return Object.freeze({
     readCurrent,
+    readBySource,
     readById,
     readPublication,
     claimAttempt,

@@ -24,10 +24,23 @@ type SnapshotModel = {
 
 type SnapshotTransaction = {
   yjsSnapshot: Pick<SnapshotModel, "aggregate" | "create">;
+  transitionJob: {
+    findFirst(input: {
+      where: {
+        id: string;
+        roomId: string;
+        state: SnapshotLeaseFence["expectedState"];
+        leaseToken: string;
+        leaseExpiresAt: { gt: Date };
+      };
+      select: { id: true };
+    }): Promise<{ id: string } | null>;
+  };
 };
 
 export type SnapshotDatabase = {
   yjsSnapshot: SnapshotModel;
+  transitionJob: SnapshotTransaction["transitionJob"];
   $transaction<T>(
     callback: (transaction: SnapshotTransaction) => Promise<T>,
     options?: { isolationLevel: "Serializable" },
@@ -35,6 +48,19 @@ export type SnapshotDatabase = {
 };
 
 export type YjsRepository = ReturnType<typeof createYjsRepository>;
+
+export type SnapshotLeaseFence = Readonly<{
+  jobId: string;
+  token: string;
+  expectedState: "publishing" | "failed" | "succeeded";
+}>;
+
+export class SnapshotLeaseLostError extends Error {
+  constructor() {
+    super("Reconstruction snapshot lease was lost");
+    this.name = "SnapshotLeaseLostError";
+  }
+}
 
 const MAX_WRITE_ATTEMPTS = 8;
 
@@ -44,7 +70,10 @@ function retryableVersionRace(error: unknown): boolean {
   return code === "P2002" || code === "P2034";
 }
 
-export function createYjsRepository(database: SnapshotDatabase) {
+export function createYjsRepository(
+  database: SnapshotDatabase,
+  { now = () => new Date() }: Readonly<{ now?: () => Date }> = {},
+) {
   return {
     async loadRoomDocument(roomId: string): Promise<Y.Doc> {
       const document = new Y.Doc();
@@ -64,6 +93,7 @@ export function createYjsRepository(database: SnapshotDatabase) {
       roomId: string,
       document: Y.Doc,
       reason: string,
+      fence?: SnapshotLeaseFence,
     ): Promise<number> {
       const payload = Buffer.from(Y.encodeStateAsUpdate(document));
 
@@ -71,6 +101,19 @@ export function createYjsRepository(database: SnapshotDatabase) {
         try {
           return await database.$transaction(
             async (transaction) => {
+              if (fence) {
+                const activeLease = await transaction.transitionJob.findFirst({
+                  where: {
+                    id: fence.jobId,
+                    roomId,
+                    state: fence.expectedState,
+                    leaseToken: fence.token,
+                    leaseExpiresAt: { gt: now() },
+                  },
+                  select: { id: true },
+                });
+                if (!activeLease) throw new SnapshotLeaseLostError();
+              }
               const latest = await transaction.yjsSnapshot.aggregate({
                 where: { roomId },
                 _max: { version: true },

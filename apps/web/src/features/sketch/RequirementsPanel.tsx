@@ -13,6 +13,7 @@ export const REQUIREMENTS_CURRENT_KEY = "current";
 
 type RequirementsPanelProps = {
   connectionError?: string | null;
+  disabled?: boolean;
   doc: Y.Doc;
 };
 
@@ -120,6 +121,7 @@ export function writeRequirements(
 
 export function RequirementsPanel({
   connectionError = null,
+  disabled = false,
   doc,
 }: RequirementsPanelProps) {
   const idPrefix = useId();
@@ -186,7 +188,7 @@ export function RequirementsPanel({
         </p>
       ) : null}
 
-      <fieldset className="requirements-panel__fields">
+      <fieldset className="requirements-panel__fields" disabled={disabled}>
         <legend>Workload requirements</legend>
         {SELECT_FIELDS.map((field) => {
           const id = `${idPrefix}-${field.key}`;

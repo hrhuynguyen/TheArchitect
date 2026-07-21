@@ -81,6 +81,25 @@ describe("RequirementsPanel", () => {
     doc.destroy();
   });
 
+  it("freezes every workload control while reconstruction is in progress", async () => {
+    const doc = new Y.Doc();
+    const user = userEvent.setup();
+    render(<RequirementsPanel disabled doc={doc} />);
+    const before = doc.getMap<unknown>("requirements").get("current");
+
+    expect(
+      screen.getByRole("group", { name: "Workload requirements" }),
+    ).toBeDisabled();
+    expect(screen.getByLabelText("Traffic volume")).toBeDisabled();
+    expect(screen.getByLabelText("Async background work")).toBeDisabled();
+
+    await user.selectOptions(screen.getByLabelText("Traffic volume"), "moderate");
+    await user.click(screen.getByLabelText("Async background work"));
+    expect(doc.getMap<unknown>("requirements").get("current")).toEqual(before);
+
+    doc.destroy();
+  });
+
   it("retains the last valid controls and reports an invalid remote value safely", () => {
     const doc = new Y.Doc();
     const requirements = doc.getMap<unknown>("requirements");

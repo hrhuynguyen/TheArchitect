@@ -28,13 +28,16 @@ vi.mock("../../../features/sketch/Whiteboard", () => ({
     onPhaseChange,
   }: {
     room: typeof baseRoom;
-    onPhaseChange?: (phase: "reconstructing") => void;
+    onPhaseChange?: (phase: "reconstructing" | "architect") => void;
   }) => (
     <section aria-label="Collaborative architecture sketch">
       <h1>Map the system together.</h1>
       <p>Live room {room.id}</p>
       <button onClick={() => onPhaseChange?.("reconstructing")} type="button">
         Confirm reconstructing
+      </button>
+      <button onClick={() => onPhaseChange?.("architect")} type="button">
+        Complete reconstruction
       </button>
     </section>
   ),
@@ -112,7 +115,7 @@ describe("room route", () => {
     );
   });
 
-  it("moves to reconstructing only when the whiteboard reports server authority", async () => {
+  it("keeps browser capture mounted until reconstruction becomes terminal", async () => {
     getRoom.mockResolvedValueOnce(baseRoom);
     const user = userEvent.setup();
     await renderRoomPage();
@@ -120,6 +123,11 @@ describe("room route", () => {
     await user.click(
       await screen.findByRole("button", { name: "Confirm reconstructing" }),
     );
+    expect(
+      screen.getByRole("region", { name: "Collaborative architecture sketch" }),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Complete reconstruction" }));
     expect(
       screen.getByRole("heading", { name: "Shape the system into a buildable plan." }),
     ).toBeVisible();
@@ -172,13 +180,6 @@ describe("room route", () => {
       contentId: "architect",
     },
     {
-      phase: "reconstructing" as const,
-      kicker: "Architect workspace ready",
-      heading: "Shape the system into a buildable plan.",
-      description: "Architecture decisions and constraints will stay visible here.",
-      contentId: "architect",
-    },
-    {
       phase: "deploy" as const,
       kicker: "Deploy workspace ready",
       heading: "Move forward with the evidence in view.",
@@ -199,6 +200,19 @@ describe("room route", () => {
         .toHaveAttribute("aria-current", "step");
     },
   );
+
+  it("restores browser reconstruction work while the rail shows architect", async () => {
+    getRoom.mockResolvedValueOnce({ ...baseRoom, phase: "reconstructing" });
+    await renderRoomPage();
+
+    expect(
+      await screen.findByRole("region", { name: "Collaborative architecture sketch" }),
+    ).toBeVisible();
+    expect(screen.getByText("Architect").closest("a")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+  });
 
   it("suppresses a room result that resolves after unmount", async () => {
     const pending = deferred<typeof baseRoom>();

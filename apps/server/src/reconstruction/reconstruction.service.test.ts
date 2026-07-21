@@ -102,6 +102,7 @@ function setup(options: {
   output?: InfrastructureIntent | Error;
   providerWait?: Promise<void>;
   publishArchitectureFailure?: Error;
+  publishFailureCleanupFailure?: Error;
   failureCleanupWait?: Promise<void>;
   phaseMirrorFailure?: Error;
   commitLost?: boolean;
@@ -132,11 +133,17 @@ function setup(options: {
   };
   const repository = {
     async readCurrent(roomId: string) { return roomId === job.roomId ? { ...job } : null; },
+    async readBySource(roomId: string, sourceSnapshotVersion: number) {
+      return roomId === job.roomId && sourceSnapshotVersion === job.sourceSnapshotVersion
+        ? { ...job }
+        : null;
+    },
     async readById(roomId: string, jobId: string) {
       return roomId === job.roomId && jobId === job.jobId ? { ...job } : null;
     },
-    async claimAttempt() {
+    async claimAttempt(input: { jobId: string }) {
       events.push("claim-commit");
+      if (input.jobId !== job.jobId) return { kind: "not_found" as const };
       if (job.state === "claimed") {
         job.state = "running";
         return { kind: "claimed" as const, state: "running" as const, lease };
@@ -230,6 +237,9 @@ function setup(options: {
     async publishFailureCleanup() {
       events.push("cleanup-persist");
       await options.failureCleanupWait;
+      if (options.publishFailureCleanupFailure) {
+        throw options.publishFailureCleanupFailure;
+      }
       events.push("cleanup-publish");
     },
     async publishArchitectPhase() {
@@ -326,6 +336,32 @@ describe("reconstruction service", () => {
     expect(test.createProvider).not.toHaveBeenCalled();
   });
 
+  it("replays the exact submitted source job after a newer transition exists", async () => {
+    const test = setup({ initialState: "failed" });
+    test.job.errorCode = "AI_UNAVAILABLE";
+    test.job.cleanupCompletedAt = new Date();
+    vi.spyOn(test.repository, "readCurrent").mockResolvedValue({
+      ...test.job,
+      jobId: "job-b",
+      sourceSnapshotVersion: 8,
+      state: "claimed",
+      errorCode: null,
+      cleanupCompletedAt: null,
+    });
+
+    await expect(test.service.reconstruct({
+      roomId: "room-a",
+      participantId: "participant-a",
+      request,
+    })).resolves.toMatchObject({
+      jobId: "job-a",
+      sourceSnapshotVersion: 7,
+      state: "failed",
+      error: { code: "AI_UNAVAILABLE" },
+    });
+    expect(test.createProvider).not.toHaveBeenCalled();
+  });
+
   it("records compiler-invalid analysis, cleans Yjs, then reopens voting", async () => {
     const invalid: InfrastructureIntent = {
       version: "infrastructure-intent/v1",
@@ -390,6 +426,27 @@ describe("reconstruction service", () => {
     cleanup.resolve();
     await expect(running).resolves.toMatchObject({ state: "failed" });
     expect(test.job.cleanupCompletedAt).toBeInstanceOf(Date);
+  });
+
+  it("keeps cleanup-pending failure public as in-flight", async () => {
+    const test = setup({
+      output: new AiProviderError("trace-a"),
+      publishFailureCleanupFailure: new Error("snapshot unavailable"),
+    });
+
+    await expect(test.service.reconstruct({
+      roomId: "room-a",
+      participantId: "participant-a",
+      request,
+    })).resolves.toMatchObject({
+      state: "publishing",
+      result: null,
+      error: null,
+    });
+    expect(test.job).toMatchObject({
+      state: "failed",
+      cleanupCompletedAt: null,
+    });
   });
 
   it("renews a running lease while provider work is pending", async () => {
@@ -515,6 +572,61 @@ describe("reconstruction service", () => {
     expect(succeeded.createProvider).not.toHaveBeenCalled();
     expect(succeeded.events).toEqual(["phase-mirror"]);
     expect(succeeded.job.phasePublishedAt).toBeInstanceOf(Date);
+  });
+
+  it("retries recovery after a fresh lease was ineligible at startup", async () => {
+    vi.useFakeTimers();
+    const test = setup({ initialState: "failed" });
+    test.job.errorCode = "RECONSTRUCTION_INVALID";
+    const originalListRecoverable = test.repository.listRecoverable.bind(
+      test.repository,
+    );
+    vi.spyOn(test.repository, "listRecoverable")
+      .mockResolvedValueOnce([])
+      .mockImplementation(originalListRecoverable);
+
+    try {
+      await test.service.recover();
+      expect(test.events).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await test.service.settle();
+      expect(test.events).toEqual([
+        "cleanup-persist",
+        "cleanup-publish",
+        "cleanup-commit",
+      ]);
+      expect(test.createProvider).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(1);
+      await test.service.destroy();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await test.service.destroy();
+      vi.useRealTimers();
+    }
+  });
+
+  it("never overlaps periodic recovery scans", async () => {
+    vi.useFakeTimers();
+    const test = setup();
+    const scan = deferred();
+    const listRecoverable = vi.spyOn(test.repository, "listRecoverable")
+      .mockImplementation(async () => {
+        await scan.promise;
+        return [];
+      });
+
+    try {
+      const startup = test.service.recover();
+      await vi.waitFor(() => expect(listRecoverable).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(listRecoverable).toHaveBeenCalledTimes(1);
+      scan.resolve();
+      await startup;
+    } finally {
+      await test.service.destroy();
+      vi.useRealTimers();
+    }
   });
 
   it("leaves a failed phase mirror recoverable", async () => {

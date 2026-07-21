@@ -263,7 +263,11 @@ function ConnectedWhiteboard({
           phase={room.phase}
           roomId={room.id}
         />
-        <RequirementsPanel connectionError={readyError || null} doc={doc} />
+        <RequirementsPanel
+          connectionError={readyError || null}
+          disabled={room.phase === "reconstructing"}
+          doc={doc}
+        />
       </aside>
     </div>
   );

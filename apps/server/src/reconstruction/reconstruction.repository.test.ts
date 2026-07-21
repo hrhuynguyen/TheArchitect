@@ -240,6 +240,22 @@ function claimedLease(result: Awaited<ReturnType<typeof claim>>): Reconstruction
 }
 
 describe("reconstruction repository", () => {
+  it("resolves the unique ready transition for an exact source revision", async () => {
+    const test = setup();
+    test.database.jobs.push({
+      ...structuredClone(test.database.jobs[0]),
+      id: "job-b",
+      sourceRevision: 8,
+      traceId: "transition-b",
+      createdAt: new Date("2026-07-21T12:01:00.000Z"),
+    });
+
+    await expect(test.repository.readBySource("room-a", 7)).resolves.toMatchObject({
+      jobId: "job-a",
+      sourceSnapshotVersion: 7,
+    });
+  });
+
   it("does not replace a fresh running attempt and seeds the real primary identity", async () => {
     const test = setup();
     const first = await claim(test);

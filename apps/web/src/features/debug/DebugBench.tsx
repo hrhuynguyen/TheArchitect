@@ -75,9 +75,12 @@ export function DebugBench() {
   const controllerRef = useRef<AbortController | null>(null);
   const activeRef = useRef(true);
 
-  useEffect(() => () => {
-    activeRef.current = false;
-    controllerRef.current?.abort();
+  useEffect(() => {
+    activeRef.current = true;
+    return () => {
+      activeRef.current = false;
+      controllerRef.current?.abort();
+    };
   }, []);
 
   const updateSelect = (key: SelectKey, value: string) => {

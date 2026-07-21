@@ -102,6 +102,15 @@ function envelope(job: ReconstructionJobRecord): ReconstructionJobEnvelope {
     });
   }
   if (job.state === "failed") {
+    if (!job.cleanupCompletedAt) {
+      return ReconstructionJobEnvelopeSchema.parse({
+        jobId: job.jobId,
+        sourceSnapshotVersion: job.sourceSnapshotVersion,
+        state: "publishing",
+        result: null,
+        error: null,
+      });
+    }
     return ReconstructionJobEnvelopeSchema.parse({
       jobId: job.jobId,
       sourceSnapshotVersion: job.sourceSnapshotVersion,
@@ -139,6 +148,8 @@ export function createReconstructionService({
 }: ReconstructionServiceOptions) {
   if (!safetySecret) throw new Error("Reconstruction safety secret is required");
   let destroyed = false;
+  let recoveryTimer: ReturnType<typeof scheduleInterval> | null = null;
+  let recoveryRun: Promise<void> | null = null;
 
   const readEnvelope = async (roomId: string, jobId: string) => {
     const job = await repository.readById(roomId, jobId);
@@ -245,7 +256,7 @@ export function createReconstructionService({
     const failed = await repository.recordFailure(lease, error, diagnostics);
     if (failed.kind === "lost") return readEnvelope(roomId, lease.jobId);
     try {
-      await publisher.publishFailureCleanup({ roomId });
+      await publisher.publishFailureCleanup({ roomId, lease });
     } catch {
       return readEnvelope(roomId, lease.jobId);
     }
@@ -263,7 +274,7 @@ export function createReconstructionService({
     }>,
   ) => {
     try {
-      await publisher.publishArchitecture(publication);
+      await publisher.publishArchitecture({ ...publication, lease });
     } catch {
       return readEnvelope(publication.roomId, lease.jobId);
     }
@@ -272,7 +283,10 @@ export function createReconstructionService({
       return readEnvelope(publication.roomId, lease.jobId);
     }
     try {
-      await publisher.publishArchitectPhase({ roomId: publication.roomId });
+      await publisher.publishArchitectPhase({
+        roomId: publication.roomId,
+        lease,
+      });
     } catch {
       return readEnvelope(publication.roomId, lease.jobId);
     }
@@ -301,7 +315,12 @@ export function createReconstructionService({
 
     const claimed = await repository.claimAttempt({
       roomId: input.roomId,
-      jobId: (await repository.readCurrent(input.roomId))?.jobId ?? "",
+      jobId: (
+        await repository.readBySource(
+          input.roomId,
+          parsed.data.sourceSnapshotVersion,
+        )
+      )?.jobId ?? "",
       sourceSnapshotVersion: parsed.data.sourceSnapshotVersion,
       participantId: input.participantId,
       inputDigest: png.digest,
@@ -402,14 +421,14 @@ export function createReconstructionService({
         if (publication) await completePublication(claimed.lease, publication);
       } else if (work === "failed_cleanup") {
         try {
-          await publisher.publishFailureCleanup({ roomId });
+          await publisher.publishFailureCleanup({ roomId, lease: claimed.lease });
         } catch {
           return;
         }
         await repository.completeFailureCleanup(claimed.lease);
       } else {
         try {
-          await publisher.publishArchitectPhase({ roomId });
+          await publisher.publishArchitectPhase({ roomId, lease: claimed.lease });
         } catch {
           return;
         }
@@ -420,7 +439,7 @@ export function createReconstructionService({
     }
   };
 
-  const recover = async () => {
+  const scanRecoverable = async () => {
     if (destroyed) return;
     const candidates = await repository.listRecoverable();
     for (const candidate of candidates) {
@@ -430,6 +449,31 @@ export function createReconstructionService({
         // Each recoverable state remains durable and can be retried later.
       }
     }
+  };
+
+  const queueRecovery = () => {
+    if (destroyed) return Promise.resolve();
+    if (recoveryRun) return recoveryRun;
+    const run = scanRecoverable().finally(() => {
+      if (recoveryRun === run) recoveryRun = null;
+    });
+    recoveryRun = run;
+    return run;
+  };
+
+  const recover = async () => {
+    if (destroyed) return;
+    if (!recoveryTimer) {
+      recoveryTimer = scheduleInterval(() => {
+        void queueRecovery().catch(() => undefined);
+      }, heartbeatMs);
+      if (
+        typeof recoveryTimer === "object" &&
+        recoveryTimer &&
+        "unref" in recoveryTimer
+      ) recoveryTimer.unref();
+    }
+    await queueRecovery();
   };
 
   const debugAnalyze = async (input: Readonly<{
@@ -459,8 +503,17 @@ export function createReconstructionService({
     jobById,
     debugAnalyze,
     recover,
-    async settle() {},
-    async destroy() { destroyed = true; },
+    async settle() {
+      while (recoveryRun) await recoveryRun;
+    },
+    async destroy() {
+      destroyed = true;
+      if (recoveryTimer) {
+        cancelInterval(recoveryTimer);
+        recoveryTimer = null;
+      }
+      if (recoveryRun) await recoveryRun;
+    },
   });
 }
 

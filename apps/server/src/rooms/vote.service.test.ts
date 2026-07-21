@@ -52,9 +52,11 @@ class MemoryVoteDatabase {
         return this.jobs.get(transitionKey(key.roomId, key.sourceRevision, key.kind)) ?? null;
       },
       findFirst: async ({ where }: { where: { roomId: string; kind: "ready" } }) =>
-        [...this.jobs.values()].find(
-          (job) => job.roomId === where.roomId && job.kind === where.kind,
-        ) ?? null,
+        [...this.jobs.values()]
+          .filter(
+            (job) => job.roomId === where.roomId && job.kind === where.kind,
+          )
+          .sort((left, right) => right.sourceRevision - left.sourceRevision)[0] ?? null,
     } as typeof this.transitionJob;
   }
 
@@ -950,6 +952,48 @@ describe("readiness transition failure and concurrency boundaries", () => {
         service.removeVote(test.roomId, "participant-a", "ready"),
       ).rejects.toBeInstanceOf(VoteClosedError);
       expect(test.database.jobs.size).toBe(1);
+    } finally {
+      await test.stop(service, deactivate);
+    }
+  });
+
+  it("replays the newest transition after a later readiness cycle", async () => {
+    const test = harness({ participantIds: ["participant-a"] });
+    test.database.rooms.set(test.roomId, "reconstructing");
+    test.live.getMap("meta").set("phase", "reconstructing");
+    test.live.getMap(SERVER_VOTES_MAP_KEY).set(
+      "ready",
+      evaluateVote({
+        activeParticipantIds: ["participant-a"],
+        voterIds: ["participant-a"],
+        threshold: READINESS_THRESHOLD,
+      }),
+    );
+    test.database.jobs.set(transitionKey(test.roomId, 2), {
+      id: "job-old",
+      roomId: test.roomId,
+      sourceRevision: 2,
+      kind: "ready",
+      traceId: "transition-old",
+    });
+    test.database.jobs.set(transitionKey(test.roomId, 9), {
+      id: "job-new",
+      roomId: test.roomId,
+      sourceRevision: 9,
+      kind: "ready",
+      traceId: "transition-new",
+    });
+    const { deactivate, service } = await test.start();
+    try {
+      await expect(
+        service.castVote(test.roomId, "participant-a", "ready"),
+      ).resolves.toMatchObject({
+        transition: {
+          claimed: false,
+          jobId: "job-new",
+          sourceSnapshotVersion: 9,
+        },
+      });
     } finally {
       await test.stop(service, deactivate);
     }

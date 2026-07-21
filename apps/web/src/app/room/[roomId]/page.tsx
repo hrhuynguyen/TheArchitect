@@ -141,7 +141,7 @@ export default function RoomPage({ params }: RoomPageProps) {
         </>
       }
     >
-      {visiblePhase === "sketch" ? (
+      {room.phase === "sketch" || room.phase === "reconstructing" ? (
         <div className="workspace-sketch" id="sketch">
           <Whiteboard
             onPhaseChange={(phase) => {
