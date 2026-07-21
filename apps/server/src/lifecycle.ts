@@ -7,6 +7,11 @@ type DatabaseConnection = {
   $disconnect(): Promise<void>;
 };
 
+type CollaborationServer = {
+  destroy(): Promise<void>;
+  listen(options: { host: string; port: number }): Promise<unknown>;
+};
+
 type ServerSignal = "SIGINT" | "SIGTERM";
 
 type SignalSource = {
@@ -16,10 +21,12 @@ type SignalSource = {
 
 type StartServerOptions = {
   app: ServerApp;
+  collaboration: CollaborationServer;
   database: DatabaseConnection;
   host?: string;
   onShutdownError?: (error: unknown) => void;
   port: number;
+  wsPort?: number;
   signals?: SignalSource;
 };
 
@@ -29,10 +36,12 @@ export type ServerLifecycle = {
 
 export async function startServer({
   app,
+  collaboration,
   database,
   host = "0.0.0.0",
   onShutdownError = console.error,
   port,
+  wsPort = port + 1,
   signals = process,
 }: StartServerOptions): Promise<ServerLifecycle> {
   let shutdownPromise: Promise<void> | undefined;
@@ -45,10 +54,25 @@ export async function startServer({
   const shutdown = (): Promise<void> => {
     unregister();
     shutdownPromise ??= (async () => {
+      const failures: unknown[] = [];
+      try {
+        await collaboration.destroy();
+      } catch (error) {
+        failures.push(error);
+      }
       try {
         await app.close();
-      } finally {
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
         await database.$disconnect();
+      } catch (error) {
+        failures.push(error);
+      }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) {
+        throw new AggregateError(failures, "Server shutdown failed");
       }
     })();
 
@@ -63,6 +87,7 @@ export async function startServer({
   signals.once("SIGTERM", handleSignal);
 
   try {
+    await collaboration.listen({ host, port: wsPort });
     await app.listen({ host, port });
   } catch (startupError) {
     try {

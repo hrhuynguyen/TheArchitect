@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./collaboration": "./src/collaboration.ts",
     "./rooms": "./src/rooms.ts"
   },
   "scripts": {

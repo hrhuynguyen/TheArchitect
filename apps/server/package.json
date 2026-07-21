@@ -13,12 +13,18 @@
   },
   "dependencies": {
     "@architect/contracts": "*",
+    "@hocuspocus/server": "3.4.4",
     "@prisma/client": "^6.19.3",
     "dotenv": "^16.6.1",
     "fastify": "^5.10.0",
+    "y-protocols": "1.0.7",
+    "yjs": "13.6.31",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "prisma": "^6.19.3"
+    "@hocuspocus/provider": "3.4.4",
+    "@types/ws": "8.18.1",
+    "prisma": "^6.19.3",
+    "ws": "8.21.1"
   }
 }

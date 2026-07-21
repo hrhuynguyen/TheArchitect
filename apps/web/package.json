@@ -11,9 +11,12 @@
   "dependencies": {
     "@architect/contracts": "*",
     "@architect/ui": "*",
+    "@hocuspocus/provider": "3.4.4",
     "next": "^16.2.10",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "y-protocols": "1.0.7",
+    "yjs": "13.6.31"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^7.0.0",
