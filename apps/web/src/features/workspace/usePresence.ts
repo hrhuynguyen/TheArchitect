@@ -47,10 +47,14 @@ export function usePresence({
   const nowRef = useRef(now);
   nowRef.current = now;
   const { cursor, phase } = identity.data;
+  const presenceRef = useRef({ cursor, phase });
+  presenceRef.current = { cursor, phase };
+  const publishRef = useRef<() => void>(() => undefined);
 
   useEffect(() => {
     const awareness = provider?.awareness;
     if (!provider || !awareness) {
+      publishRef.current = () => undefined;
       setProfiles([]);
       return;
     }
@@ -61,9 +65,13 @@ export function usePresence({
       } catch {
         return;
       }
-      awareness.setLocalStateField("presence", {
-        ...(cursor ? { cursor } : {}),
-        phase,
+      const current = presenceRef.current;
+      awareness.setLocalState({
+        ...(awareness.getLocalState() ?? {}),
+        presence: {
+          ...(current.cursor ? { cursor: current.cursor } : {}),
+          phase: current.phase,
+        },
       });
     };
     const receiveSnapshot = ({ payload }: { payload: string }) => {
@@ -88,16 +96,22 @@ export function usePresence({
     };
 
     setProfiles([]);
+    publishRef.current = publish;
     provider.on("stateless", receiveSnapshot);
     publish();
     const heartbeat = setInterval(publish, heartbeatMs);
 
     return () => {
+      publishRef.current = () => undefined;
       clearInterval(heartbeat);
       provider.off("stateless", receiveSnapshot);
       awareness.setLocalState(null);
     };
-  }, [provider, cursor?.x, cursor?.y, heartbeatMs, phase]);
+  }, [provider, heartbeatMs]);
+
+  useEffect(() => {
+    publishRef.current();
+  }, [provider, cursor?.x, cursor?.y, phase]);
 
   return profiles;
 }

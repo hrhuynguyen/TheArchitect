@@ -22,6 +22,15 @@ vi.mock("../../../features/rooms/api", async (importOriginal) => {
   };
 });
 
+vi.mock("../../../features/sketch/Whiteboard", () => ({
+  Whiteboard: ({ room }: { room: typeof baseRoom }) => (
+    <section aria-label="Collaborative architecture sketch">
+      <h1>Map the system together.</h1>
+      <p>Live room {room.id}</p>
+    </section>
+  ),
+}));
+
 import { RoomApiError } from "../../../features/rooms/api";
 import RoomPage from "./page";
 
@@ -71,7 +80,10 @@ describe("room route", () => {
     await act(async () => pending.resolve(baseRoom));
 
     expect(
-      await screen.findByRole("heading", { name: "Start with the shape of the system." }),
+      await screen.findByRole("heading", { name: "Map the system together." }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("region", { name: "Collaborative architecture sketch" }),
     ).toBeVisible();
   });
 
@@ -120,7 +132,7 @@ describe("room route", () => {
     await user.click(screen.getByRole("button", { name: "Try again" }));
 
     expect(
-      await screen.findByRole("heading", { name: "Start with the shape of the system." }),
+      await screen.findByRole("heading", { name: "Map the system together." }),
     ).toBeVisible();
     expect(getRoom).toHaveBeenCalledTimes(2);
   });
@@ -172,7 +184,7 @@ describe("room route", () => {
     await act(async () => pending.resolve(baseRoom));
 
     expect(
-      screen.queryByRole("heading", { name: "Start with the shape of the system." }),
+      screen.queryByRole("heading", { name: "Map the system together." }),
     ).not.toBeInTheDocument();
   });
 });

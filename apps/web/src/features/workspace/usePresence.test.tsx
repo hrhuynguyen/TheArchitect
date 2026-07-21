@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import type { AwarenessIdentity } from "@architect/contracts";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
 import { act, renderHook } from "@testing-library/react";
 import { Awareness } from "y-protocols/awareness";
@@ -102,6 +103,38 @@ describe("usePresence", () => {
     awareness.destroy();
     document.destroy();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps awareness alive while publishing a changing cursor", () => {
+    vi.useFakeTimers();
+    const document = new Y.Doc();
+    const awareness = new Awareness(document);
+    const { provider } = fakeProvider("room-a", awareness);
+    const withoutCursor: AwarenessIdentity = {
+      participantId: profile.participantId,
+      name: profile.name,
+      color: profile.color,
+      phase: profile.phase,
+    };
+    const view = renderHook(
+      ({ currentProfile }: { currentProfile: AwarenessIdentity }) =>
+        usePresence({ provider, profile: currentProfile }),
+      {
+        initialProps: { currentProfile: withoutCursor },
+      },
+    );
+
+    expect(awareness.getLocalState()).toEqual({
+      presence: { phase: "sketch" },
+    });
+    view.rerender({ currentProfile: profile });
+    expect(awareness.getLocalState()).toEqual({
+      presence: { cursor: { x: 4, y: 8 }, phase: "sketch" },
+    });
+
+    view.unmount();
+    awareness.destroy();
+    document.destroy();
   });
 
   it.each([

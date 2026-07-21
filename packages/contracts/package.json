@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./collaboration": "./src/collaboration.ts",
+    "./requirements": "./src/requirements.ts",
     "./rooms": "./src/rooms.ts"
   },
   "scripts": {

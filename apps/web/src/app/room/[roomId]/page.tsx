@@ -2,10 +2,26 @@
 
 import type { RoomSummary } from "@architect/contracts";
 import { Button, StatusBadge } from "@architect/ui";
+import dynamic from "next/dynamic";
 import { use, useEffect, useState } from "react";
 import { RoomApiError, roomApi } from "../../../features/rooms/api";
 import { visibleWorkspacePhase } from "../../../features/workspace/PhaseRail";
 import { WorkspaceShell } from "../../../features/workspace/WorkspaceShell";
+
+const Whiteboard = dynamic(
+  () =>
+    import("../../../features/sketch/Whiteboard").then(
+      (module) => module.Whiteboard,
+    ),
+  {
+    loading: () => (
+      <div className="whiteboard-state">
+        <p role="status">Loading drawing tools…</p>
+      </div>
+    ),
+    ssr: false,
+  },
+);
 
 type RoomPageProps = {
   params: Promise<{ roomId: string }>;
@@ -125,12 +141,18 @@ export default function RoomPage({ params }: RoomPageProps) {
         </>
       }
     >
-      <div className="workspace-empty" id={visiblePhase}>
-        <span className="workspace-empty__mark" aria-hidden="true" />
-        <p className="section-kicker">{content.kicker}</p>
-        <h1>{content.heading}</h1>
-        <p>{content.description}</p>
-      </div>
+      {visiblePhase === "sketch" ? (
+        <div className="workspace-sketch" id="sketch">
+          <Whiteboard room={room} />
+        </div>
+      ) : (
+        <div className="workspace-empty" id={visiblePhase}>
+          <span className="workspace-empty__mark" aria-hidden="true" />
+          <p className="section-kicker">{content.kicker}</p>
+          <h1>{content.heading}</h1>
+          <p>{content.description}</p>
+        </div>
+      )}
     </WorkspaceShell>
   );
 }

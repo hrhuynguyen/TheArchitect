@@ -3,3 +3,4 @@ export const CONTRACT_VERSION = "architect/v1" as const;
 
 export * from "@architect/contracts/rooms";
 export * from "@architect/contracts/collaboration";
+export * from "@architect/contracts/requirements";
