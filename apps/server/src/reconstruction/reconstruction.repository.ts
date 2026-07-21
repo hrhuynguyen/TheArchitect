@@ -1,4 +1,6 @@
 import {
+  ArchitectureLayoutSchema,
+  ArchitectureSchema,
   ReconstructionAnalysisSchema,
   ReconstructionPublicErrorSchema,
   ReconstructionResultSchema,
@@ -171,6 +173,24 @@ export function createReconstructionRepository({
     return job ? publicJob(job) : null;
   };
 
+  const readPublication = async (jobId: string) => {
+    const job = await database.transitionJob.findFirst({
+      where: {
+        id: jobId,
+        state: "publishing",
+        architectureRevisionId: { not: null },
+      },
+      include: { architectureRevision: true },
+    });
+    if (!job?.architectureRevision) return null;
+    return Object.freeze({
+      roomId: job.roomId,
+      revisionId: job.architectureRevision.id,
+      architecture: ArchitectureSchema.parse(job.architectureRevision.architecture),
+      layout: ArchitectureLayoutSchema.parse(job.architectureRevision.layout),
+    });
+  };
+
   const claimAttempt = async (input: Readonly<{
     roomId: string;
     jobId: string;
@@ -337,7 +357,7 @@ export function createReconstructionRepository({
       const revisionId = createId();
       const version = (latest._max.version ?? 0) + 1;
       const layout = {
-        version: "architecture-layout/v1",
+        version: "architecture-layout/v1" as const,
         revisionId,
         nodes: [],
       };
@@ -541,12 +561,24 @@ export function createReconstructionRepository({
   });
 
   const listRecoverable = async () => {
+    const listedAt = now();
     const jobs = await database.transitionJob.findMany({
       where: {
-        OR: [
-          { state: "publishing", architectureRevisionId: { not: null } },
-          { state: "failed", cleanupCompletedAt: null },
-          { state: "succeeded", phasePublishedAt: null },
+        AND: [
+          {
+            OR: [
+              { state: "publishing", architectureRevisionId: { not: null } },
+              { state: "failed", cleanupCompletedAt: null },
+              { state: "succeeded", phasePublishedAt: null },
+            ],
+          },
+          {
+            OR: [
+              { leaseToken: null },
+              { leaseExpiresAt: null },
+              { leaseExpiresAt: { lte: listedAt } },
+            ],
+          },
         ],
       },
     });
@@ -567,6 +599,7 @@ export function createReconstructionRepository({
   return Object.freeze({
     readCurrent,
     readById,
+    readPublication,
     claimAttempt,
     claimRecovery,
     renewLease,
