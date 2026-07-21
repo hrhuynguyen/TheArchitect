@@ -33,6 +33,10 @@ import type { ReconstructionRouteDatabase } from "./reconstruction/reconstructio
 import { createRevisionRepository } from "./architecture/revision.repository.js";
 import { createRevisionService } from "./architecture/revision.service.js";
 import type { ArchitectureRouteDatabase } from "./architecture/architecture.routes.js";
+import type { ArchitectRouteDatabase } from "./architecture/architect.routes.js";
+import { createArchitectProposalRepository } from "./architecture/architectProposal.repository.js";
+import { createArchitectProviderRuntime } from "./architecture/architect.runtime.js";
+import { createArchitectService } from "./architecture/architect.service.js";
 
 loadRootEnv();
 const env = parseEnv(process.env);
@@ -46,6 +50,54 @@ const revisionService = createRevisionService({
   documents,
   repository: revisionRepository,
   persistRoomSnapshot: yjsRepository.persistRoomSnapshot,
+});
+const architectProviders = createArchitectProviderRuntime(env);
+const architectRepository = createArchitectProposalRepository({
+  database: prisma,
+});
+const architectService = createArchitectService({
+  documents,
+  repository: architectRepository,
+  providerRuntime: architectProviders,
+  latestSnapshotVersion: async (roomId) => {
+    const result = await prisma.yjsSnapshot.aggregate({
+      where: { roomId },
+      _max: { version: true },
+    });
+    if (result._max.version === null) {
+      throw new Error("Architect snapshot not found");
+    }
+    return result._max.version;
+  },
+  recentHistory: async (roomId) => {
+    const rows = await prisma.historyEvent.findMany({
+      where: { roomId },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+      select: {
+        kind: true,
+        status: true,
+        title: true,
+        summary: true,
+        createdAt: true,
+      },
+    });
+    return rows.map((row) => {
+      if (
+        row.status !== "pending"
+        && row.status !== "succeeded"
+        && row.status !== "failed"
+      ) {
+        throw new Error("Invalid history status");
+      }
+      return {
+        ...row,
+        status: row.status,
+        createdAt: row.createdAt.toISOString(),
+      };
+    });
+  },
+  safetySecret: env.COOKIE_SIGNING_SECRET,
 });
 let reportVotePersistenceFailure: (error: unknown) => void = () => undefined;
 const voteService = createVoteService({
@@ -76,6 +128,13 @@ const reconstructionService = createReconstructionService({
 });
 await reconstructionService.recover();
 const app = buildApp({
+  architectConfig: {
+    nodeEnv: env.NODE_ENV,
+    cookieSigningSecret: env.COOKIE_SIGNING_SECRET,
+    ownerTokenPepper: env.OWNER_TOKEN_PEPPER,
+  },
+  architectDatabase: prisma as unknown as ArchitectRouteDatabase,
+  architectService,
   architectureConfig: {
     nodeEnv: env.NODE_ENV,
     cookieSigningSecret: env.COOKIE_SIGNING_SECRET,

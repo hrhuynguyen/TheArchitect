@@ -29,8 +29,17 @@ import {
   type ArchitectureRouteDatabase,
 } from "./architecture/architecture.routes.js";
 import type { RevisionService } from "./architecture/revision.service.js";
+import {
+  registerArchitectRoutes,
+  type ArchitectRouteConfig,
+  type ArchitectRouteDatabase,
+} from "./architecture/architect.routes.js";
+import type { ArchitectService } from "./architecture/architect.service.js";
 
 type BuildAppOptions = {
+  architectConfig?: ArchitectRouteConfig;
+  architectDatabase?: ArchitectRouteDatabase;
+  architectService?: ArchitectService;
   architectureConfig?: ArchitectureRouteConfig;
   architectureDatabase?: ArchitectureRouteDatabase;
   architectureService?: RevisionService;
@@ -47,7 +56,10 @@ type BuildAppOptions = {
 };
 
 export function buildApp(options: BuildAppOptions = {}) {
-  const app = Fastify({ logger: options.logger ?? false });
+  const app = Fastify({
+    logger: options.logger ?? false,
+    routerOptions: { maxParamLength: 256 },
+  });
   const checkDatabaseHealth = options.databaseHealth ?? databaseHealth;
   const runtimeConfig = () => {
     if (options.roomConfig) return options.roomConfig;
@@ -77,6 +89,24 @@ export function buildApp(options: BuildAppOptions = {}) {
   });
 
   registerRoomRoutes(app, { service: roomService, getConfig: runtimeConfig });
+  if (options.architectService) {
+    const architectConfig = () => {
+      if (options.architectConfig) return options.architectConfig;
+      const env = parseEnv(process.env);
+      return {
+        nodeEnv: env.NODE_ENV,
+        cookieSigningSecret: env.COOKIE_SIGNING_SECRET,
+        ownerTokenPepper: env.OWNER_TOKEN_PEPPER,
+      };
+    };
+    registerArchitectRoutes(app, {
+      database:
+        options.architectDatabase
+        ?? (prisma as unknown as ArchitectRouteDatabase),
+      getConfig: architectConfig,
+      service: options.architectService,
+    });
+  }
   if (options.architectureService) {
     const architectureConfig = () => {
       if (options.architectureConfig) return options.architectureConfig;

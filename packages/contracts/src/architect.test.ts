@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ApplyArchitectPatchRequestSchema,
+  ArchitectApiErrorResponseSchema,
   ArchitectProviderOutputSchema,
   ArchitectTurnListSchema,
   ArchitectTurnRequestSchema,
@@ -205,6 +206,33 @@ describe("architect contracts", () => {
     expect(ApplyArchitectPatchRequestSchema.safeParse({
       ...applyRequest,
       rationale: "x".repeat(501),
+    }).success).toBe(false);
+  });
+
+  it("strictly bounds every public architect API error response", () => {
+    const conflict = {
+      code: "revision_conflict" as const,
+      message: "Architecture revision is stale",
+      currentRevisionId: "revision-2",
+    };
+    const unavailable = {
+      code: "architect_unavailable" as const,
+      message: "Architect unavailable",
+    };
+
+    expect(ArchitectApiErrorResponseSchema.parse(conflict)).toEqual(conflict);
+    expect(ArchitectApiErrorResponseSchema.parse(unavailable)).toEqual(unavailable);
+    expect(ArchitectApiErrorResponseSchema.safeParse({
+      ...unavailable,
+      stack: "raw-internal-stack",
+    }).success).toBe(false);
+    expect(ArchitectApiErrorResponseSchema.safeParse({
+      ...unavailable,
+      message: "x".repeat(241),
+    }).success).toBe(false);
+    expect(ArchitectApiErrorResponseSchema.safeParse({
+      code: "unknown_error",
+      message: "Unknown",
     }).success).toBe(false);
   });
 });

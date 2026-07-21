@@ -160,6 +160,46 @@ export type RejectArchitectPatchRequest = z.infer<
   typeof rejectArchitectPatchRequestSchema
 >;
 
+const architectApiErrorMessageSchema = z.string().trim().min(1).max(240);
+const architectApiSimpleErrorCodeSchema = z.enum([
+  "unauthorized",
+  "invalid_architect_request",
+  "architect_unavailable",
+  "terminal_conflict",
+  "idempotency_conflict",
+  "destructive_confirmation_required",
+  "invalid_agent_patch",
+  "architect_turn_not_found",
+]);
+
+export const architectApiErrorResponseSchema = z.discriminatedUnion("code", [
+  z
+    .object({
+      code: architectApiSimpleErrorCodeSchema,
+      message: architectApiErrorMessageSchema,
+    })
+    .strict(),
+  z
+    .object({
+      code: z.literal("revision_conflict"),
+      message: architectApiErrorMessageSchema,
+      currentRevisionId: identifierSchema.nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      code: z.literal("working_state_conflict"),
+      message: architectApiErrorMessageSchema,
+      currentRevisionId: identifierSchema.nullable(),
+    })
+    .strict(),
+]);
+export const ArchitectApiErrorResponseSchema =
+  architectApiErrorResponseSchema;
+export type ArchitectApiErrorResponse = z.infer<
+  typeof architectApiErrorResponseSchema
+>;
+
 export const architectTurnErrorSchema = z
   .object({
     code: z.enum([

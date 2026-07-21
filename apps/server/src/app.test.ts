@@ -5,6 +5,8 @@ import { buildApp } from "./app";
 
 const reconstructionSecret =
   "app-reconstruction-cookie-secret-at-least-32-characters";
+const architectSecret =
+  "app-architect-cookie-secret-at-least-32-characters";
 
 describe("server app", () => {
   it("enables a capturable Fastify logger only when configured", async () => {
@@ -144,5 +146,49 @@ describe("server app", () => {
 
     await app.close();
     expect(reconstructionService.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("registers architect routes with durable participant authorization", async () => {
+    const architectService = {
+      runTurn: vi.fn(),
+      listTurns: vi.fn().mockResolvedValue({ turns: [] }),
+      applyPatch: vi.fn(),
+      rejectPatch: vi.fn(),
+    };
+    const app = buildApp({
+      architectConfig: {
+        nodeEnv: "test",
+        cookieSigningSecret: architectSecret,
+        ownerTokenPepper: "app-architect-owner-pepper-at-least-32-characters",
+      },
+      architectDatabase: {
+        participant: {
+          async findFirst() { return { id: "participant-a" }; },
+        },
+        room: {
+          async findUnique() { return null; },
+        },
+      },
+      architectService: architectService as never,
+    });
+    const signed = signParticipant(
+      { roomId: "room-a", participantId: "participant-a" },
+      architectSecret,
+    );
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/rooms/room-a/architect/turns",
+        headers: {
+          cookie: `${participantCookieName("room-a")}=${encodeURIComponent(signed)}`,
+        },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ turns: [] });
+      expect(architectService.listTurns).toHaveBeenCalledWith("room-a");
+    } finally {
+      await app.close();
+    }
   });
 });
