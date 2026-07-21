@@ -2193,6 +2193,74 @@ describe("compileIntent", () => {
     );
   });
 
+  it.each([
+    ["matching", { "app-a": "vpc-a", "app-b": "vpc-b" }],
+    ["swapped", { "app-a": "vpc-b", "app-b": "vpc-a" }],
+  ] as const)(
+    "keeps %s directly owned workloads owner-local after generated prerequisites",
+    (_order, expectedOwners) => {
+      const result = compileIntent(
+        {
+          version: "infrastructure-intent/v1",
+          resources: [
+            { id: "vpc-a", type: "VPC", name: "VPC A", properties: {} },
+            { id: "vpc-b", type: "VPC", name: "VPC B", properties: {} },
+            {
+              id: "app-a",
+              type: "EC2",
+              name: "Application A",
+              zone: "private",
+              properties: {},
+            },
+            {
+              id: "app-b",
+              type: "EC2",
+              name: "Application B",
+              zone: "private",
+              properties: {},
+            },
+          ],
+          relationships: Object.entries(expectedOwners).map(
+            ([appId, vpcId]) => ({
+              sourceId: vpcId,
+              targetId: appId,
+              kind: "contains" as const,
+            }),
+          ),
+        },
+        baseRequirements(),
+      );
+      const materialized = materializeApprovedArchitecture(result.deploymentPlan);
+
+      expect(
+        result.diagnostics.filter(
+          (diagnostic) =>
+            diagnostic.code === "AMBIGUOUS_VPC_ATTACHMENT" &&
+            Object.hasOwn(expectedOwners, diagnostic.resourceId ?? ""),
+        ),
+      ).toEqual([]);
+      for (const architecture of [result.architecture, materialized]) {
+        for (const [appId, vpcId] of Object.entries(expectedOwners)) {
+          for (const kind of ["hosts", "protects"] as const) {
+            const attachment = architecture.relationships.find(
+              (relationship) =>
+                relationship.kind === kind && relationship.targetId === appId,
+            );
+            expect(attachment).toBeDefined();
+            expect(
+              architecture.relationships.some(
+                (relationship) =>
+                  relationship.kind === "contains" &&
+                  relationship.sourceId === vpcId &&
+                  relationship.targetId === attachment?.sourceId,
+              ),
+            ).toBe(true);
+          }
+        }
+      }
+    },
+  );
+
   it("inherits an explicitly hosted primary compute VPC for staged replicas and inferred protection", () => {
     const result = compileIntent(
       {
@@ -2426,6 +2494,253 @@ describe("compileIntent", () => {
         ),
       ),
     ).toBe(true);
+  });
+
+  it("scopes generated growth ingress routes to the staged ELB VPC", () => {
+    const result = compileIntent(
+      {
+        version: "infrastructure-intent/v1",
+        resources: [
+          { id: "user", type: "External", name: "User", properties: {} },
+          {
+            id: "vpc-a",
+            type: "VPC",
+            name: "VPC A",
+            properties: { maxAvailabilityZones: 2 },
+          },
+          {
+            id: "subnet-a-public",
+            type: "Subnet",
+            name: "Public A",
+            zone: "public",
+            properties: { availabilityZone: "az-a", subnetType: "public" },
+          },
+          {
+            id: "subnet-a-private",
+            type: "Subnet",
+            name: "Private A",
+            zone: "private",
+            properties: { availabilityZone: "az-a", subnetType: "private" },
+          },
+          {
+            id: "sg-a",
+            type: "SecurityGroup",
+            name: "Security group A",
+            properties: {},
+          },
+          {
+            id: "app-a",
+            type: "EC2",
+            name: "Application A",
+            zone: "private",
+            properties: {},
+          },
+          {
+            id: "vpc-b",
+            type: "VPC",
+            name: "VPC B",
+            properties: { maxAvailabilityZones: 2 },
+          },
+          {
+            id: "subnet-b-private",
+            type: "Subnet",
+            name: "Private B",
+            zone: "private",
+            properties: { availabilityZone: "az-a", subnetType: "private" },
+          },
+          {
+            id: "sg-b",
+            type: "SecurityGroup",
+            name: "Security group B",
+            properties: {},
+          },
+          {
+            id: "app-b",
+            type: "EC2",
+            name: "Application B",
+            zone: "private",
+            properties: {},
+          },
+        ],
+        relationships: [
+          ...[
+            ["vpc-a", "subnet-a-public"],
+            ["vpc-a", "subnet-a-private"],
+            ["vpc-a", "sg-a"],
+            ["vpc-a", "app-a"],
+            ["vpc-b", "subnet-b-private"],
+            ["vpc-b", "sg-b"],
+            ["vpc-b", "app-b"],
+          ].map(([sourceId, targetId]) => ({
+            sourceId: sourceId!,
+            targetId: targetId!,
+            kind: "contains" as const,
+          })),
+          {
+            sourceId: "subnet-a-private",
+            targetId: "app-a",
+            kind: "hosts",
+          },
+          { sourceId: "sg-a", targetId: "app-a", kind: "protects" },
+          {
+            sourceId: "subnet-b-private",
+            targetId: "app-b",
+            kind: "hosts",
+          },
+          { sourceId: "sg-b", targetId: "app-b", kind: "protects" },
+          { sourceId: "user", targetId: "app-a", kind: "routes" },
+        ],
+      },
+      criticalExternalRequirements,
+    );
+    const stagedIngress = result.architecture.resources.find(
+      (resource) => resource.type === "ELB" && resource.origin === "stage-upgrade",
+    );
+    const stagedRouteTargets = result.architecture.relationships
+      .filter(
+        (relationship) =>
+          relationship.kind === "routes" &&
+          relationship.sourceId === stagedIngress?.id,
+      )
+      .map((relationship) => relationship.targetId)
+      .sort();
+
+    expect(result.stageDecision.stage).toBe("growth");
+    expect(
+      result.diagnostics.filter((diagnostic) => diagnostic.level === "error"),
+    ).toEqual([]);
+    expect(stagedRouteTargets).toEqual(["app-a"]);
+    expect(
+      result.architecture.relationships.some(
+        (relationship) =>
+          relationship.origin === "explicit" &&
+          relationship.kind === "routes" &&
+          relationship.sourceId === "user" &&
+          relationship.targetId === "app-a",
+      ),
+    ).toBe(true);
+  });
+
+  it("routes A-owned production replicas through A ingress without routing B workloads", () => {
+    const result = compileIntent(
+      {
+        version: "infrastructure-intent/v1",
+        resources: [
+          { id: "user", type: "External", name: "User", properties: {} },
+          {
+            id: "vpc-a",
+            type: "VPC",
+            name: "VPC A",
+            properties: { maxAvailabilityZones: 2 },
+          },
+          {
+            id: "subnet-a-public",
+            type: "Subnet",
+            name: "Public A",
+            zone: "public",
+            properties: { availabilityZone: "az-a", subnetType: "public" },
+          },
+          {
+            id: "subnet-a-private",
+            type: "Subnet",
+            name: "Private A",
+            zone: "private",
+            properties: { availabilityZone: "az-a", subnetType: "private" },
+          },
+          {
+            id: "sg-a",
+            type: "SecurityGroup",
+            name: "Security group A",
+            properties: {},
+          },
+          {
+            id: "app-a",
+            type: "EC2",
+            name: "Application A",
+            zone: "private",
+            properties: {},
+          },
+          {
+            id: "vpc-b",
+            type: "VPC",
+            name: "VPC B",
+            properties: { maxAvailabilityZones: 2 },
+          },
+          {
+            id: "subnet-b-private",
+            type: "Subnet",
+            name: "Private B",
+            zone: "private",
+            properties: { availabilityZone: "az-a", subnetType: "private" },
+          },
+          {
+            id: "sg-b",
+            type: "SecurityGroup",
+            name: "Security group B",
+            properties: {},
+          },
+          {
+            id: "app-b",
+            type: "EC2",
+            name: "Application B",
+            zone: "private",
+            properties: {},
+          },
+        ],
+        relationships: [
+          ...[
+            ["vpc-a", "subnet-a-public"],
+            ["vpc-a", "subnet-a-private"],
+            ["vpc-a", "sg-a"],
+            ["vpc-a", "app-a"],
+            ["vpc-b", "subnet-b-private"],
+            ["vpc-b", "sg-b"],
+            ["vpc-b", "app-b"],
+          ].map(([sourceId, targetId]) => ({
+            sourceId: sourceId!,
+            targetId: targetId!,
+            kind: "contains" as const,
+          })),
+          {
+            sourceId: "subnet-a-private",
+            targetId: "app-a",
+            kind: "hosts",
+          },
+          { sourceId: "sg-a", targetId: "app-a", kind: "protects" },
+          {
+            sourceId: "subnet-b-private",
+            targetId: "app-b",
+            kind: "hosts",
+          },
+          { sourceId: "sg-b", targetId: "app-b", kind: "protects" },
+          { sourceId: "user", targetId: "app-a", kind: "routes" },
+        ],
+      },
+      baseRequirements({
+        audience: "external",
+        availability: "continuous",
+      }),
+    );
+    const stagedIngress = result.architecture.resources.find(
+      (resource) => resource.type === "ELB" && resource.origin === "stage-upgrade",
+    );
+    const replica = result.architecture.resources.find(
+      (resource) => resource.type === "EC2" && resource.origin === "stage-upgrade",
+    );
+    const stagedRouteTargets = new Set(
+      result.architecture.relationships
+        .filter(
+          (relationship) =>
+            relationship.kind === "routes" &&
+            relationship.sourceId === stagedIngress?.id,
+        )
+        .map((relationship) => relationship.targetId),
+    );
+
+    expect(result.stageDecision.stage).toBe("production");
+    expect(replica).toBeDefined();
+    expect(stagedRouteTargets).toEqual(new Set(["app-a", replica!.id]));
+    expect(stagedRouteTargets.has("app-b")).toBe(false);
   });
 
   it("adds owner-scoped staged compute coverage when an explicit SG resolves the VPC", () => {

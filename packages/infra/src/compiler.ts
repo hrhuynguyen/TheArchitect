@@ -1257,21 +1257,21 @@ function compileCore(
           (securityGroup) => securityGroup.id === relationship.sourceId,
         ),
     );
-    const ownerEvidence: Set<string>[] = [];
-    const addOwnerEvidence = (ownerIds: Set<string>): void => {
-      if (ownerIds.size > 0) ownerEvidence.push(ownerIds);
+    const strongOwnerEvidence: Set<string>[] = [];
+    const addStrongOwnerEvidence = (ownerIds: Set<string>): void => {
+      if (ownerIds.size > 0) strongOwnerEvidence.push(ownerIds);
     };
-    addOwnerEvidence(resourceOwnerIds.get(hosted.id) ?? new Set<string>());
+    addStrongOwnerEvidence(resourceOwnerIds.get(hosted.id) ?? new Set<string>());
     const replicaPrimaryOwnerId = hostedVpcOwnerIds.get(
       computeReplicaPrimaryIds.get(hosted.id) ?? "",
     );
     if (replicaPrimaryOwnerId) {
-      addOwnerEvidence(new Set([replicaPrimaryOwnerId]));
+      addStrongOwnerEvidence(new Set([replicaPrimaryOwnerId]));
     }
-    addOwnerEvidence(
+    addStrongOwnerEvidence(
       ownerIdsFor(explicitHosting.map((relationship) => relationship.sourceId)),
     );
-    addOwnerEvidence(
+    addStrongOwnerEvidence(
       ownerIdsFor(
         explicitProtection.map((relationship) => relationship.sourceId),
       ),
@@ -1281,14 +1281,17 @@ function compileCore(
       securityGroups.length === 1 &&
       securityGroups[0]?.origin === "explicit"
     ) {
-      addOwnerEvidence(ownerIdsFor([securityGroups[0]!.id]));
+      addStrongOwnerEvidence(ownerIdsFor([securityGroups[0]!.id]));
     }
-    if (explicitHosting.length === 0) {
-      addOwnerEvidence(
+    const ownerEvidence = [...strongOwnerEvidence];
+    if (ownerEvidence.length === 0 && explicitHosting.length === 0) {
+      const compatibleSubnetOwners =
         commonOwnerIdsFor(
           rawPlacementSubnetsFor(hosted).map((subnet) => subnet.id),
-        ),
-      );
+        );
+      if (compatibleSubnetOwners.size > 0) {
+        ownerEvidence.push(compatibleSubnetOwners);
+      }
     }
 
     let ownerCandidates = new Set(vpcIds);
@@ -1492,6 +1495,7 @@ function compileCore(
   }
 
   if (stagedIngress) {
+    const stagedIngressOwnerId = hostedVpcOwnerIds.get(stagedIngress.id);
     for (const relationship of validIntentRelationships) {
       const sourceIntent = explicitBySourceId.get(relationship.sourceId);
       const targetIntent = explicitBySourceId.get(relationship.targetId);
@@ -1507,6 +1511,12 @@ function compileCore(
       }
     }
     for (const compute of resourcesOfType("EC2")) {
+      if (
+        !stagedIngressOwnerId ||
+        hostedVpcOwnerIds.get(compute.id) !== stagedIngressOwnerId
+      ) {
+        continue;
+      }
       addRelationship({
         source: stagedIngress,
         target: compute,
