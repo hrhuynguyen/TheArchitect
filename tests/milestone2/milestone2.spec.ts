@@ -1,5 +1,10 @@
 import { PrismaClient } from "@prisma/client";
 import {
+  ARCHITECTURE_CURRENT_KEY,
+  ARCHITECTURE_MAP_KEY,
+  WorkingArchitectureSchema,
+} from "@architect/contracts";
+import {
   expect,
   test,
   type BrowserContext,
@@ -81,6 +86,46 @@ async function persistedWorkspaceReady(
   } finally {
     document.destroy();
   }
+}
+
+async function persistedArchitecture(
+  prisma: PrismaClient,
+  roomId: string,
+) {
+  const snapshot = await prisma.yjsSnapshot.findFirstOrThrow({
+    where: { roomId },
+    orderBy: { version: "desc" },
+    select: { payload: true, version: true },
+  });
+  const document = new Y.Doc();
+  try {
+    Y.applyUpdate(document, snapshot.payload);
+    const architecture = WorkingArchitectureSchema.parse(
+      document
+        .getMap(ARCHITECTURE_MAP_KEY)
+        .get(ARCHITECTURE_CURRENT_KEY),
+    );
+    return {
+      revisionId: architecture.revisionId,
+      resourceNames: architecture.architecture.resources.map(({ name }) => name),
+      snapshotVersion: snapshot.version,
+    };
+  } finally {
+    document.destroy();
+  }
+}
+
+async function expectArchitectTurn(
+  page: Page,
+  responseText: string,
+): Promise<void> {
+  await expect(page.getByText(responseText, { exact: true })).toBeVisible();
+}
+
+async function expectQueueCount(page: Page, count: number): Promise<void> {
+  await expect(
+    page.locator(".architecture-node").filter({ hasText: "Orders queue" }),
+  ).toHaveCount(count);
 }
 
 test.beforeAll(async () => {
@@ -206,6 +251,143 @@ test("proves two-context consensus, one transition, and restart recovery", async
       select: { version: true },
     });
     expect(phaseSnapshot.version).toBeGreaterThan(transition.sourceRevision);
+
+    const explanationText =
+      "The current architecture contains the resources and relationships shown on the shared canvas.";
+    await ada.getByRole("textbox", { name: "Ask the Architect" })
+      .fill("Explain this architecture.");
+    await ada.getByRole("button", { name: "Ask Architect" }).click();
+    await Promise.all([
+      expectArchitectTurn(ada, explanationText),
+      expectArchitectTurn(grace, explanationText),
+    ]);
+    await expect
+      .poll(() => prisma.architectProposal.count({
+        where: { roomId, state: "answered" },
+      }))
+      .toBe(1);
+
+    const beforeProposal = await persistedArchitecture(prisma, roomId);
+    const beforeRevisionCount = await prisma.architectureRevision.count({
+      where: { roomId },
+    });
+    await grace.getByRole("textbox", { name: "Ask the Architect" })
+      .fill("Add an SQS queue.");
+    await grace.getByRole("button", { name: "Ask Architect" }).click();
+    const proposalText = "I can add an SQS queue to buffer asynchronous work.";
+    await Promise.all([
+      expectArchitectTurn(ada, proposalText),
+      expectArchitectTurn(grace, proposalText),
+    ]);
+    await Promise.all([expectQueueCount(ada, 0), expectQueueCount(grace, 0)]);
+    await expect(
+      ada.getByRole("heading", { name: "Revision 1" }),
+    ).toBeVisible();
+    await expect(
+      grace.getByRole("heading", { name: "Revision 1" }),
+    ).toBeVisible();
+    await expect
+      .poll(() => prisma.architectProposal.count({
+        where: { roomId, state: "proposal_ready" },
+      }))
+      .toBe(1);
+    expect(await persistedArchitecture(prisma, roomId)).toEqual(beforeProposal);
+    expect(await prisma.architectureRevision.count({ where: { roomId } }))
+      .toBe(beforeRevisionCount);
+
+    await grace.getByRole("button", { name: "Review patch" }).click();
+    const reviewDialog = grace.getByRole("dialog", {
+      name: "Review Architect patch",
+    });
+    await expect(reviewDialog).toContainText("Add SQS “Orders queue”");
+    await reviewDialog
+      .getByLabel("Review rationale")
+      .fill("Buffer asynchronous orders across transient worker failures.");
+    await reviewDialog.getByRole("button", { name: "Apply patch" }).click();
+
+    await Promise.all([expectQueueCount(ada, 1), expectQueueCount(grace, 1)]);
+    await Promise.all([
+      expect(
+        ada.getByRole("heading", { name: "Revision 2" }),
+      ).toBeVisible(),
+      expect(
+        grace.getByRole("heading", { name: "Revision 2" }),
+      ).toBeVisible(),
+    ]);
+    await expect
+      .poll(async () => {
+        const [applied, revisions, revisionEvents, proposalEvents] =
+          await Promise.all([
+            prisma.architectProposal.count({
+              where: { roomId, state: "applied" },
+            }),
+            prisma.architectureRevision.count({ where: { roomId } }),
+            prisma.historyEvent.count({
+              where: { roomId, kind: "architecture_revision_saved" },
+            }),
+            prisma.historyEvent.count({
+              where: { roomId, kind: "architect_proposal_applied" },
+            }),
+          ]);
+        return { applied, proposalEvents, revisionEvents, revisions };
+      })
+      .toEqual({
+        applied: 1,
+        proposalEvents: 1,
+        revisionEvents: 1,
+        revisions: 2,
+      });
+    const afterApply = await persistedArchitecture(prisma, roomId);
+    expect(afterApply.revisionId).not.toBe(beforeProposal.revisionId);
+    expect(afterApply.resourceNames).toEqual(
+      expect.arrayContaining(["Sketch storage", "Orders queue"]),
+    );
+    expect(afterApply.snapshotVersion).toBeGreaterThan(
+      beforeProposal.snapshotVersion,
+    );
+
+    await environment.restartServer();
+    await Promise.all([ada.reload(), grace.reload()]);
+    await Promise.all([
+      expect(
+        ada.getByRole("heading", { name: architectHeading }),
+      ).toBeVisible(),
+      expect(
+        grace.getByRole("heading", { name: architectHeading }),
+      ).toBeVisible(),
+    ]);
+    await Promise.all([expectQueueCount(ada, 1), expectQueueCount(grace, 1)]);
+    await Promise.all([
+      expect(
+        ada.getByRole("heading", { name: "Revision 2" }),
+      ).toBeVisible(),
+      expect(
+        grace.getByRole("heading", { name: "Revision 2" }),
+      ).toBeVisible(),
+      expectArchitectTurn(ada, explanationText),
+      expectArchitectTurn(grace, explanationText),
+      expectArchitectTurn(ada, proposalText),
+      expectArchitectTurn(grace, proposalText),
+    ]);
+    const afterRestart = await persistedArchitecture(prisma, roomId);
+    expect(afterRestart).toMatchObject({
+      revisionId: afterApply.revisionId,
+      resourceNames: afterApply.resourceNames,
+    });
+    expect(afterRestart.snapshotVersion).toBeGreaterThanOrEqual(
+      afterApply.snapshotVersion,
+    );
+    await expect(
+      prisma.architectProposal.groupBy({
+        by: ["state"],
+        where: { roomId },
+        _count: { _all: true },
+        orderBy: { state: "asc" },
+      }),
+    ).resolves.toEqual([
+      { _count: { _all: 1 }, state: "answered" },
+      { _count: { _all: 1 }, state: "applied" },
+    ]);
   } finally {
     await Promise.all([adaContext.close(), graceContext.close()]);
     await prisma.$disconnect();
