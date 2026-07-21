@@ -21,5 +21,6 @@ cdk.out/
 
 # Local tools and operating-system files
 .superpowers/
+.worktrees/
 .DS_Store
 *.log
