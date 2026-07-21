@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ArchitectureOperationRequestSchema,
+  ArchitectureOperationResponseSchema,
   GraphOperationBatchSchema,
   GraphOperationSchema,
 } from "./operations.js";
+import { defaultRequirementsProfile } from "./requirements.js";
 
 const confirmation = {
   confirmed: true as const,
@@ -90,5 +93,60 @@ describe("GraphOperation contracts", () => {
         ignored: true,
       }).success,
     ).toBe(false);
+  });
+
+  it("parses strict operation request and atomic result envelopes", () => {
+    const architecture = {
+      version: "architecture/v1" as const,
+      requirements: defaultRequirementsProfile(),
+      resources: [],
+      relationships: [],
+      decisions: [],
+      unresolvedQuestions: [],
+    };
+    const state = {
+      architecture: {
+        version: "working-architecture/v1" as const,
+        revisionId: "revision-a",
+        architecture,
+      },
+      layout: {
+        version: "architecture-layout/v1" as const,
+        revisionId: "revision-a",
+        nodes: [],
+      },
+    };
+    const request = {
+      baseRevisionId: "revision-a",
+      operations: [{
+        type: "add_resource" as const,
+        resource: {
+          id: "queue",
+          type: "SQS" as const,
+          name: "Queue",
+          properties: {},
+          origin: "explicit" as const,
+          reason: "Added manually.",
+          approvalStatus: "not-required" as const,
+        },
+      }],
+      layout: state.layout,
+    };
+
+    expect(ArchitectureOperationRequestSchema.parse(request)).toEqual(request);
+    expect(ArchitectureOperationResponseSchema.parse({
+      ok: true,
+      state,
+      diagnostics: [],
+    })).toEqual({ ok: true, state, diagnostics: [] });
+    expect(ArchitectureOperationResponseSchema.safeParse({
+      ok: false,
+      state,
+      diagnostics: [],
+    }).success).toBe(false);
+    expect(ArchitectureOperationRequestSchema.safeParse({
+      ...request,
+      ignored: true,
+    }).success).toBe(false);
   });
 });

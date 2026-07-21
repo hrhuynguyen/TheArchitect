@@ -30,6 +30,9 @@ import { createReconstructionRepository } from "./reconstruction/reconstruction.
 import { createReconstructionProviderRuntime } from "./reconstruction/reconstruction.runtime.js";
 import { createReconstructionService } from "./reconstruction/reconstruction.service.js";
 import type { ReconstructionRouteDatabase } from "./reconstruction/reconstruction.routes.js";
+import { createRevisionRepository } from "./architecture/revision.repository.js";
+import { createRevisionService } from "./architecture/revision.service.js";
+import type { ArchitectureRouteDatabase } from "./architecture/architecture.routes.js";
 
 loadRootEnv();
 const env = parseEnv(process.env);
@@ -37,6 +40,12 @@ const awarenessRegistry = createAwarenessRegistry();
 const yjsRepository = createYjsRepository(prisma as unknown as SnapshotDatabase);
 const documents = createActiveDocumentRegistry({
   loadRoomDocument: yjsRepository.loadRoomDocument,
+});
+const revisionRepository = createRevisionRepository({ database: prisma });
+const revisionService = createRevisionService({
+  documents,
+  repository: revisionRepository,
+  persistRoomSnapshot: yjsRepository.persistRoomSnapshot,
 });
 let reportVotePersistenceFailure: (error: unknown) => void = () => undefined;
 const voteService = createVoteService({
@@ -67,6 +76,13 @@ const reconstructionService = createReconstructionService({
 });
 await reconstructionService.recover();
 const app = buildApp({
+  architectureConfig: {
+    nodeEnv: env.NODE_ENV,
+    cookieSigningSecret: env.COOKIE_SIGNING_SECRET,
+    ownerTokenPepper: env.OWNER_TOKEN_PEPPER,
+  },
+  architectureDatabase: prisma as unknown as ArchitectureRouteDatabase,
+  architectureService: revisionService,
   logger: createRuntimeLoggerOptions(),
   roomConfig: {
     nodeEnv: env.NODE_ENV,

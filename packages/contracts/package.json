@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./architecture": "./src/architecture.ts",
     "./collaboration": "./src/collaboration.ts",
+    "./history": "./src/history.ts",
     "./infrastructure": "./src/infrastructure.ts",
     "./operations": "./src/operations.ts",
     "./requirements": "./src/requirements.ts",

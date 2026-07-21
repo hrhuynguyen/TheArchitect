@@ -23,8 +23,17 @@ import {
   type ReconstructionRouteDatabase,
 } from "./reconstruction/reconstruction.routes.js";
 import type { ReconstructionService } from "./reconstruction/reconstruction.service.js";
+import {
+  registerArchitectureRoutes,
+  type ArchitectureRouteConfig,
+  type ArchitectureRouteDatabase,
+} from "./architecture/architecture.routes.js";
+import type { RevisionService } from "./architecture/revision.service.js";
 
 type BuildAppOptions = {
+  architectureConfig?: ArchitectureRouteConfig;
+  architectureDatabase?: ArchitectureRouteDatabase;
+  architectureService?: RevisionService;
   databaseHealth?: typeof databaseHealth;
   logger?: FastifyServerOptions["logger"];
   roomConfig?: RoomRouteConfig;
@@ -68,6 +77,24 @@ export function buildApp(options: BuildAppOptions = {}) {
   });
 
   registerRoomRoutes(app, { service: roomService, getConfig: runtimeConfig });
+  if (options.architectureService) {
+    const architectureConfig = () => {
+      if (options.architectureConfig) return options.architectureConfig;
+      const env = parseEnv(process.env);
+      return {
+        nodeEnv: env.NODE_ENV,
+        cookieSigningSecret: env.COOKIE_SIGNING_SECRET,
+        ownerTokenPepper: env.OWNER_TOKEN_PEPPER,
+      };
+    };
+    registerArchitectureRoutes(app, {
+      database:
+        options.architectureDatabase ??
+        (prisma as unknown as ArchitectureRouteDatabase),
+      getConfig: architectureConfig,
+      service: options.architectureService,
+    });
+  }
   if (options.reconstructionService) {
     const reconstructionConfig = () => {
       if (options.reconstructionConfig) return options.reconstructionConfig;

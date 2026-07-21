@@ -4,9 +4,14 @@ import {
   approvalStatusSchema,
   architectureRelationshipSchema,
   architectureResourceSchema,
+  diagnosticSchema,
   infrastructureZoneSchema,
   resourcePropertiesSchema,
 } from "@architect/contracts/infrastructure";
+import {
+  architectureLayoutSchema,
+  reconstructionYjsStateSchema,
+} from "@architect/contracts/reconstruction";
 
 export const destructiveConfirmationSchema = z
   .object({
@@ -93,3 +98,53 @@ export const graphOperationBatchSchema = z
   .max(200);
 export const GraphOperationBatchSchema = graphOperationBatchSchema;
 export type GraphOperationBatch = z.infer<typeof graphOperationBatchSchema>;
+
+const revisionIdentifierSchema = z.string().trim().min(1).max(200);
+
+export const architectureOperationRequestSchema = z
+  .object({
+    baseRevisionId: revisionIdentifierSchema,
+    operations: graphOperationBatchSchema,
+    layout: architectureLayoutSchema.optional(),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    if (
+      request.layout &&
+      request.layout.revisionId !== request.baseRevisionId
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["layout", "revisionId"],
+        message: "Layout revision id must match the operation base revision.",
+      });
+    }
+  });
+export const ArchitectureOperationRequestSchema =
+  architectureOperationRequestSchema;
+export type ArchitectureOperationRequest = z.infer<
+  typeof architectureOperationRequestSchema
+>;
+
+const operationResultFields = {
+  state: reconstructionYjsStateSchema,
+  diagnostics: z.array(diagnosticSchema).max(2_000),
+} as const;
+
+export const architectureOperationResponseSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    ...operationResultFields,
+    diagnostics: z.array(diagnosticSchema).max(0),
+  }).strict(),
+  z.object({
+    ok: z.literal(false),
+    ...operationResultFields,
+    diagnostics: z.array(diagnosticSchema).min(1).max(2_000),
+  }).strict(),
+]);
+export const ArchitectureOperationResponseSchema =
+  architectureOperationResponseSchema;
+export type ArchitectureOperationResponse = z.infer<
+  typeof architectureOperationResponseSchema
+>;
