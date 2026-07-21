@@ -183,6 +183,7 @@ export function ArchitectPanel({
   const [reviewRetry, setReviewRetry] = useState<ReviewRetry | null>(null);
   const [pollEpoch, setPollEpoch] = useState(0);
   const [pollingExhausted, setPollingExhausted] = useState(false);
+  const panelFocusTarget = useRef<HTMLElement>(null);
   const mounted = useRef(false);
   const listInFlight = useRef<Readonly<{
     fetchBoundary: FetchBoundary;
@@ -410,7 +411,12 @@ export function ArchitectPanel({
   };
 
   return (
-    <section className="architect-panel" aria-labelledby="architect-panel-title">
+    <section
+      aria-labelledby="architect-panel-title"
+      className="architect-panel"
+      ref={panelFocusTarget}
+      tabIndex={-1}
+    >
       <header>
         <p className="section-kicker">AI design partner</p>
         <h2 id="architect-panel-title">Ask the Architect</h2>
@@ -509,6 +515,7 @@ export function ArchitectPanel({
         <PatchReviewDialog
           busyAction={reviewBusy}
           error={requestError}
+          fallbackFocusRef={panelFocusTarget}
           onApply={(input) => void review(
             "apply",
             selectedProposal.id,

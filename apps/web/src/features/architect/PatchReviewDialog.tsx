@@ -8,7 +8,12 @@ import type {
 } from "@architect/contracts";
 import { Button } from "@architect/ui";
 import { createPortal } from "react-dom";
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 
 type ProposalTurn = Extract<ArchitectTurn, { kind: "proposal" }>;
 type ReviewAction = "apply" | "reject";
@@ -38,6 +43,7 @@ function isDestructive(turn: ProposalTurn) {
 export function PatchReviewDialog({
   busyAction,
   error,
+  fallbackFocusRef,
   onApply,
   onClose,
   onReject,
@@ -47,6 +53,7 @@ export function PatchReviewDialog({
 }: Readonly<{
   busyAction: ReviewAction | null;
   error: string | null;
+  fallbackFocusRef: RefObject<HTMLElement | null>;
   onApply(input: Readonly<{
     rationale: string;
     destructiveConfirmation?: DestructiveConfirmation;
@@ -116,9 +123,12 @@ export function PatchReviewDialog({
         else element.setAttribute("aria-hidden", ariaHidden);
         if (!inert) element.removeAttribute("inert");
       }
-      if (previousFocus?.isConnected) previousFocus.focus();
+      const focusTarget = previousFocus?.isConnected
+        ? previousFocus
+        : fallbackFocusRef.current;
+      if (focusTarget?.isConnected) focusTarget.focus();
     };
-  }, [portalNode]);
+  }, [fallbackFocusRef, portalNode]);
 
   if (portalNode === null) return null;
 

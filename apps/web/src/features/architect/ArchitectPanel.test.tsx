@@ -583,6 +583,7 @@ describe("ArchitectPanel", () => {
     });
 
     const trigger = await screen.findByRole("button", { name: "Review patch" });
+    const fallback = screen.getByRole("region", { name: "Ask the Architect" });
     await user.click(trigger);
     expect(screen.getByRole("dialog", { name: "Review Architect patch" }))
       .toBeVisible();
@@ -593,6 +594,7 @@ describe("ArchitectPanel", () => {
       .toBeNull();
     expect(screen.getByText("Applied")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Apply patch" })).toBeNull();
+    expect(fallback).toHaveFocus();
     expect(fetchBoundary).toHaveBeenCalledTimes(2);
   });
 
