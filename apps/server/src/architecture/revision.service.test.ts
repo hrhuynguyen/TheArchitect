@@ -60,7 +60,9 @@ const addQueue = {
 async function setup(options: {
   persistFailure?: Error;
   applyFailure?: Error;
-  commitResult?: { kind: "stale"; currentRevisionId: string | null };
+  commitResult?:
+    | { kind: "stale"; currentRevisionId: string | null }
+    | { kind: "working_conflict" };
 } = {}) {
   const live = new Y.Doc();
   live.getMap(ARCHITECTURE_MAP_KEY).set(
@@ -113,6 +115,7 @@ async function setup(options: {
     commitRevision: vi.fn(async (input: any) => {
       events.push("commit");
       if (options.commitResult) return options.commitResult;
+      expect(input.expectedProtectedState).toEqual(initialState);
       const snapshot = new Y.Doc();
       try {
         Y.applyUpdate(snapshot, input.snapshotPayload);
@@ -418,6 +421,28 @@ describe("revision service", () => {
       })).rejects.toEqual(new ArchitectureServiceError(
         "STALE_REVISION",
         "revision-newer",
+      ));
+      expect(test.events).toEqual(["commit"]);
+      expect(liveState(test.live)).toEqual(initialState);
+    } finally {
+      await test.stop();
+    }
+  });
+
+  it("maps a revision protected-state conflict without publishing stale state", async () => {
+    const test = await setup({ commitResult: { kind: "working_conflict" } });
+    try {
+      await expect(test.service.saveRevision({
+        roomId: "room-a",
+        participantId: "participant-a",
+        traceId: "request-7",
+        request: {
+          baseRevisionId: "revision-a",
+          rationale: "Capture the accepted graph.",
+        },
+      })).rejects.toEqual(new ArchitectureServiceError(
+        "WORKING_STATE_CONFLICT",
+        "revision-a",
       ));
       expect(test.events).toEqual(["commit"]);
       expect(liveState(test.live)).toEqual(initialState);

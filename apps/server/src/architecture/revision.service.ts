@@ -260,6 +260,7 @@ export function createRevisionService({
           rationale: request.data.rationale,
           traceId: input.traceId,
           snapshotPayload: Y.encodeStateAsUpdate(candidate),
+          expectedProtectedState: state,
         });
         if (result.kind === "stale") {
           throw new ArchitectureServiceError(
@@ -269,6 +270,12 @@ export function createRevisionService({
         }
         if (result.kind === "not_found") {
           throw new ArchitectureServiceError("ARCHITECTURE_NOT_FOUND");
+        }
+        if (result.kind === "working_conflict") {
+          throw new ArchitectureServiceError(
+            "WORKING_STATE_CONFLICT",
+            state.architecture.revisionId,
+          );
         }
         const delta = Y.encodeStateAsUpdate(
           candidate,

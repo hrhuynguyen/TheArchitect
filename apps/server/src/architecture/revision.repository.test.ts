@@ -1,4 +1,9 @@
-import { defaultRequirementsProfile } from "@architect/contracts";
+import {
+  ARCHITECTURE_CURRENT_KEY,
+  ARCHITECTURE_LAYOUT_MAP_KEY,
+  ARCHITECTURE_MAP_KEY,
+  defaultRequirementsProfile,
+} from "@architect/contracts";
 import * as Y from "yjs";
 import { describe, expect, it } from "vitest";
 
@@ -24,6 +29,16 @@ class MemoryDatabase {
   retryOnce = false;
   transactionAttempts = 0;
   transactionOptions: unknown[] = [];
+
+  constructor() {
+    this.snapshots.push({
+      id: "snapshot-1",
+      roomId: "room-a",
+      version: 1,
+      payload: snapshotPayload(protectedState()),
+      reason: "architecture_fixture",
+    });
+  }
 
   #client(state = this) {
     return {
@@ -69,6 +84,9 @@ class MemoryDatabase {
           .sort((left, right) => right.version - left.version),
       },
       yjsSnapshot: {
+        findFirst: async ({ where }: any) => state.snapshots
+          .filter((row) => row.roomId === where.roomId)
+          .sort((left, right) => right.version - left.version)[0] ?? null,
         aggregate: async ({ where }: any) => ({
           _max: {
             version: Math.max(
@@ -144,9 +162,62 @@ const layout = {
   nodes: [],
 };
 
+function protectedState(name?: string) {
+  const protectedArchitecture = {
+    ...architecture,
+    resources: name ? [{
+      id: "bucket",
+      type: "S3" as const,
+      name,
+      properties: {},
+      origin: "explicit" as const,
+      reason: "Protected-state revision race fixture.",
+      approvalStatus: "not-required" as const,
+    }] : [],
+  };
+  return {
+    architecture: {
+      version: "working-architecture/v1" as const,
+      revisionId: "revision-a",
+      architecture: protectedArchitecture,
+    },
+    layout: {
+      version: "architecture-layout/v1" as const,
+      revisionId: "revision-a",
+      nodes: name ? [{ resourceId: "bucket", x: 0, y: 0 }] : [],
+    },
+  };
+}
+
+function snapshotPayload(state: ReturnType<typeof protectedState>) {
+  const document = new Y.Doc();
+  try {
+    document.getMap(ARCHITECTURE_MAP_KEY).set(
+      ARCHITECTURE_CURRENT_KEY,
+      state.architecture,
+    );
+    document.getMap(ARCHITECTURE_LAYOUT_MAP_KEY).set(
+      ARCHITECTURE_CURRENT_KEY,
+      state.layout,
+    );
+    return Y.encodeStateAsUpdate(document);
+  } finally {
+    document.destroy();
+  }
+}
+
 function commitInput() {
   const document = new Y.Doc();
-  const snapshotPayload = Y.encodeStateAsUpdate(document);
+  const expectedProtectedState = protectedState();
+  document.getMap(ARCHITECTURE_MAP_KEY).set(ARCHITECTURE_CURRENT_KEY, {
+    ...expectedProtectedState.architecture,
+    revisionId: "revision-b",
+  });
+  document.getMap(ARCHITECTURE_LAYOUT_MAP_KEY).set(ARCHITECTURE_CURRENT_KEY, {
+    ...expectedProtectedState.layout,
+    revisionId: "revision-b",
+  });
+  const candidateSnapshotPayload = Y.encodeStateAsUpdate(document);
   document.destroy();
   return {
     roomId: "room-a",
@@ -159,7 +230,8 @@ function commitInput() {
     author: { type: "participant" as const, id: "participant-a" },
     rationale: "Capture the accepted graph.",
     traceId: "request-7",
-    snapshotPayload,
+    snapshotPayload: candidateSnapshotPayload,
+    expectedProtectedState,
   };
 }
 
@@ -167,8 +239,9 @@ describe("revision repository", () => {
   it("atomically commits revision, history, room pointer, and rebased Yjs snapshot", async () => {
     const database = new MemoryDatabase();
     const repository = createRevisionRepository({ database: database as never });
+    const input = commitInput();
 
-    const result = await repository.commitRevision(commitInput());
+    const result = await repository.commitRevision(input);
 
     expect(result).toMatchObject({
       kind: "committed",
@@ -187,12 +260,12 @@ describe("revision repository", () => {
       },
     });
     expect(database.rooms[0].currentRevisionId).toBe("revision-b");
-    expect(database.snapshots).toHaveLength(1);
-    expect(database.snapshots[0]).toMatchObject({
+    expect(database.snapshots).toHaveLength(2);
+    expect(database.snapshots[1]).toMatchObject({
       roomId: "room-a",
-      version: 1,
+      version: 2,
       reason: "architecture_revision",
-      payload: Buffer.from(commitInput().snapshotPayload),
+      payload: Buffer.from(input.snapshotPayload),
     });
     expect(database.transactionOptions[0]).toMatchObject({
       isolationLevel: "Serializable",
@@ -210,7 +283,26 @@ describe("revision repository", () => {
     });
     expect(database.revisions).toHaveLength(1);
     expect(database.history).toHaveLength(0);
-    expect(database.snapshots).toHaveLength(0);
+    expect(database.snapshots).toHaveLength(1);
+  });
+
+  it("returns working conflict without partial writes when an operation advances the protected state", async () => {
+    const database = new MemoryDatabase();
+    database.snapshots.push({
+      roomId: "room-a",
+      version: 2,
+      payload: snapshotPayload(protectedState("Operation winner")),
+      reason: "architecture_operations",
+    });
+    const repository = createRevisionRepository({ database: database as never });
+
+    await expect(repository.commitRevision(commitInput())).resolves.toEqual({
+      kind: "working_conflict",
+    });
+    expect(database.rooms[0].currentRevisionId).toBe("revision-a");
+    expect(database.revisions).toHaveLength(1);
+    expect(database.history).toHaveLength(0);
+    expect(database.snapshots).toHaveLength(2);
   });
 
   it("rolls back all writes if any atomic revision write fails", async () => {
@@ -224,7 +316,7 @@ describe("revision repository", () => {
     expect(database.rooms[0].currentRevisionId).toBe("revision-a");
     expect(database.revisions).toHaveLength(1);
     expect(database.history).toHaveLength(0);
-    expect(database.snapshots).toHaveLength(0);
+    expect(database.snapshots).toHaveLength(1);
   });
 
   it("retries serializable conflicts and lists immutable records newest first", async () => {

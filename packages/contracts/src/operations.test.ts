@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ArchitectureConflictResponseSchema,
   ArchitectureOperationRequestSchema,
   ArchitectureOperationResponseSchema,
   GraphOperationBatchSchema,
@@ -169,6 +170,24 @@ describe("GraphOperation contracts", () => {
     expect(ArchitectureOperationRequestSchema.safeParse({
       baseRevisionId: "revision-a",
       operations: [],
+    }).success).toBe(false);
+  });
+
+  it("bounds public revision conflict responses", () => {
+    expect(ArchitectureConflictResponseSchema.parse({
+      code: "working_state_conflict",
+      message: "Working architecture changed. Refresh and retry.",
+      currentRevisionId: "revision-a",
+    })).toMatchObject({ code: "working_state_conflict" });
+    expect(ArchitectureConflictResponseSchema.safeParse({
+      code: "database_secret",
+      message: "internal",
+      currentRevisionId: "revision-a",
+    }).success).toBe(false);
+    expect(ArchitectureConflictResponseSchema.safeParse({
+      code: "stale_revision",
+      message: "x".repeat(201),
+      currentRevisionId: "revision-a",
     }).success).toBe(false);
   });
 });

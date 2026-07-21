@@ -4,6 +4,7 @@ import {
   ARCHITECTURE_CURRENT_KEY,
   ARCHITECTURE_LAYOUT_MAP_KEY,
   ARCHITECTURE_MAP_KEY,
+  ArchitectureConflictResponseSchema,
   ArchitectureOperationResponseSchema,
   ReconstructionYjsStateSchema,
   RevisionHistoryResponseSchema,
@@ -115,6 +116,17 @@ async function jsonBody(response: Response, message: string): Promise<unknown> {
   } catch {
     throw new PublicEditorError(message);
   }
+}
+
+function conflictMessage(body: unknown): string | null {
+  const conflict = ArchitectureConflictResponseSchema.safeParse(body);
+  if (!conflict.success) return null;
+  const message = conflict.data.message.endsWith(".")
+    ? conflict.data.message
+    : `${conflict.data.message}.`;
+  return conflict.data.currentRevisionId
+    ? `${message} Current revision: ${conflict.data.currentRevisionId}.`
+    : message;
 }
 
 export function GraphEditor({
@@ -264,6 +276,18 @@ export function GraphEditor({
         response,
         "Architecture update returned an invalid response.",
       );
+      if (!response.ok) {
+        const publicMessage = conflictMessage(body);
+        if (publicMessage) throw new PublicEditorError(publicMessage);
+        const rejected = ArchitectureOperationResponseSchema.safeParse(body);
+        if (rejected.success && !rejected.data.ok) {
+          throw new PublicEditorError(
+            rejected.data.diagnostics[0]?.message ??
+              "Architecture update was rejected.",
+          );
+        }
+        throw new PublicEditorError("Architecture update could not be saved.");
+      }
       const parsed = ArchitectureOperationResponseSchema.safeParse(body);
       if (!parsed.success) {
         throw new PublicEditorError("Architecture update returned an invalid response.");
@@ -272,9 +296,6 @@ export function GraphEditor({
         throw new PublicEditorError(
           parsed.data.diagnostics[0]?.message ?? "Architecture update was rejected.",
         );
-      }
-      if (!response.ok) {
-        throw new PublicEditorError("Architecture update could not be saved.");
       }
     } catch (error) {
       setRequestError(
@@ -431,7 +452,12 @@ export function GraphEditor({
         response,
         "Revision save returned an invalid response.",
       );
-      if (!response.ok) throw new PublicEditorError("Revision could not be saved.");
+      if (!response.ok) {
+        const publicMessage = conflictMessage(body);
+        throw new PublicEditorError(
+          publicMessage ?? "Revision could not be saved.",
+        );
+      }
       const parsed = SaveRevisionResponseSchema.safeParse(body);
       if (!parsed.success) {
         throw new PublicEditorError("Revision save returned an invalid response.");

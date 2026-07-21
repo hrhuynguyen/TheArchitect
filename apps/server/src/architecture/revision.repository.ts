@@ -1,13 +1,20 @@
 import {
+  ARCHITECTURE_CURRENT_KEY,
+  ARCHITECTURE_LAYOUT_MAP_KEY,
+  ARCHITECTURE_MAP_KEY,
   ArchitectureRevisionSchema,
   HistoryEventSchema,
+  ReconstructionYjsStateSchema,
   RevisionHistoryResponseSchema,
   type Architecture,
   type ArchitectureLayout,
   type HistoryActorType,
+  type ReconstructionYjsState,
   type RequirementsProfile,
 } from "@architect/contracts";
 import { Prisma, type PrismaClient } from "@prisma/client";
+import { isDeepStrictEqual } from "node:util";
+import * as Y from "yjs";
 
 const TRANSACTION_RETRIES = 3;
 
@@ -28,6 +35,7 @@ export type RevisionCommitInput = Readonly<{
   rationale: string;
   traceId: string;
   snapshotPayload: Uint8Array;
+  expectedProtectedState: ReconstructionYjsState;
 }>;
 
 export type RevisionCommitResult =
@@ -37,7 +45,28 @@ export type RevisionCommitResult =
       event: ReturnType<typeof HistoryEventSchema.parse>;
     }>
   | Readonly<{ kind: "stale"; currentRevisionId: string | null }>
+  | Readonly<{ kind: "working_conflict" }>
   | Readonly<{ kind: "not_found" }>;
+
+function protectedStateFromSnapshot(
+  snapshot: Readonly<{ payload: Uint8Array }> | null,
+): ReconstructionYjsState | null {
+  if (!snapshot) return null;
+  const document = new Y.Doc();
+  try {
+    Y.applyUpdate(document, new Uint8Array(snapshot.payload));
+    return ReconstructionYjsStateSchema.parse({
+      architecture: document
+        .getMap(ARCHITECTURE_MAP_KEY)
+        .get(ARCHITECTURE_CURRENT_KEY),
+      layout: document
+        .getMap(ARCHITECTURE_LAYOUT_MAP_KEY)
+        .get(ARCHITECTURE_CURRENT_KEY),
+    });
+  } finally {
+    document.destroy();
+  }
+}
 
 function isRetryable(error: unknown): boolean {
   return Boolean(
@@ -122,6 +151,17 @@ export function createRevisionRepository({
         kind: "stale",
         currentRevisionId: room.currentRevisionId,
       };
+    }
+    const latestSnapshot = await client.yjsSnapshot.findFirst({
+      where: { roomId: input.roomId },
+      orderBy: { version: "desc" },
+      select: { payload: true },
+    });
+    if (!isDeepStrictEqual(
+      protectedStateFromSnapshot(latestSnapshot),
+      input.expectedProtectedState,
+    )) {
+      return { kind: "working_conflict" };
     }
 
     const baseRevision = await client.architectureRevision.findFirst({

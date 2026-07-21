@@ -602,6 +602,20 @@ databaseDescribe("Prisma architecture editing boundaries", () => {
         currentRevisionId: revisionId,
       },
     });
+    await database.architectureRevision.create({
+      data: {
+        id: revisionId,
+        roomId: room.id,
+        version: 1,
+        architecture,
+        layout,
+        requirements,
+        stage: "prototype",
+        authorType: "ai",
+        authorId: "integration:cas-fixture",
+        rationale: "Concurrent protected-state CAS fixture.",
+      },
+    });
     const yjs = createYjsRepository(database as unknown as SnapshotDatabase);
     const initial = new Y.Doc();
     initial.getMap(ARCHITECTURE_MAP_KEY).set(ARCHITECTURE_CURRENT_KEY, {
@@ -675,6 +689,89 @@ databaseDescribe("Prisma architecture editing boundaries", () => {
         );
       } finally {
         restarted.destroy();
+      }
+
+      const saveLive = await yjs.loadRoomDocument(room.id);
+      const operationLive = await yjs.loadRoomDocument(room.id);
+      const saveDocuments = createActiveDocumentRegistry({
+        loadRoomDocument: yjs.loadRoomDocument,
+      });
+      const operationDocuments = createActiveDocumentRegistry({
+        loadRoomDocument: yjs.loadRoomDocument,
+      });
+      const deactivateSave = await saveDocuments.activate(room.id, saveLive);
+      const deactivateOperation = await operationDocuments.activate(
+        room.id,
+        operationLive,
+      );
+      const revisions = createRevisionRepository({ database });
+      const saveCaptured = deferred();
+      const releaseSave = deferred();
+      const saveService = createRevisionService({
+        documents: saveDocuments,
+        repository: {
+          listHistory: revisions.listHistory,
+          async commitRevision(input) {
+            saveCaptured.resolve();
+            await releaseSave.promise;
+            return revisions.commitRevision(input);
+          },
+        },
+        persistRoomSnapshot: yjs.persistRoomSnapshot,
+      });
+      const operationService = createRevisionService({
+        documents: operationDocuments,
+        repository: revisions,
+        persistRoomSnapshot: yjs.persistRoomSnapshot,
+      });
+      try {
+        const save = saveService.saveRevision({
+          roomId: room.id,
+          participantId: "participant-save",
+          traceId: "request-save-race",
+          request: {
+            baseRevisionId: revisionId,
+            rationale: "Must not discard the concurrent operation.",
+          },
+        });
+        await saveCaptured.promise;
+        await expect(operationService.applyOperations({
+          roomId: room.id,
+          request: {
+            baseRevisionId: revisionId,
+            operations: [{
+              type: "update_resource",
+              resourceId: "bucket",
+              changes: { name: "Operation before save commit" },
+            }],
+          },
+        })).resolves.toMatchObject({ ok: true });
+        releaseSave.resolve();
+
+        await expect(save).rejects.toMatchObject({
+          code: "WORKING_STATE_CONFLICT",
+          currentRevisionId: revisionId,
+        });
+        expect(await database.architectureRevision.count({
+          where: { roomId: room.id },
+        })).toBe(1);
+        expect(await database.historyEvent.count({
+          where: { roomId: room.id },
+        })).toBe(0);
+        expect(await database.yjsSnapshot.count({
+          where: { roomId: room.id },
+        })).toBe(3);
+        expect((await database.room.findUniqueOrThrow({
+          where: { id: room.id },
+        })).currentRevisionId).toBe(revisionId);
+      } finally {
+        releaseSave.resolve();
+        await deactivateSave();
+        await deactivateOperation();
+        await saveDocuments.destroy();
+        await operationDocuments.destroy();
+        saveLive.destroy();
+        operationLive.destroy();
       }
     } finally {
       initial.destroy();

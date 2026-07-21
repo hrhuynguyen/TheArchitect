@@ -162,3 +162,16 @@ export const ArchitectureOperationResponseSchema =
 export type ArchitectureOperationResponse = z.infer<
   typeof architectureOperationResponseSchema
 >;
+
+export const architectureConflictResponseSchema = z
+  .object({
+    code: z.enum(["stale_revision", "working_state_conflict"]),
+    message: z.string().trim().min(1).max(200),
+    currentRevisionId: revisionIdentifierSchema.nullable(),
+  })
+  .strict();
+export const ArchitectureConflictResponseSchema =
+  architectureConflictResponseSchema;
+export type ArchitectureConflictResponse = z.infer<
+  typeof architectureConflictResponseSchema
+>;

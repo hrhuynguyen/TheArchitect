@@ -499,4 +499,61 @@ describe("GraphEditor", () => {
       screen.getByRole("heading", { name: "Revision 2" }),
     ).toBeVisible());
   });
+
+  it("surfaces the bounded working-state conflict from an operation 409", async () => {
+    const test = setup();
+    test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/revisions") && !init?.method) {
+        return response({ revisions: [], events: [] });
+      }
+      if (url.endsWith("/operations")) {
+        return response({
+          code: "working_state_conflict",
+          message: "Working architecture changed. Refresh and retry.",
+          currentRevisionId: "revision-a",
+        }, 409);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const user = userEvent.setup();
+    render(<GraphEditor dependencies={test.dependencies as never} roomId="room-a" />);
+
+    await user.click(await screen.findByRole("button", {
+      name: "Simulate node move",
+    }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Working architecture changed. Refresh and retry. Current revision: revision-a.",
+    );
+  });
+
+  it("surfaces the bounded stale-revision conflict from a revision 409", async () => {
+    const test = setup();
+    test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/revisions") && !init?.method) {
+        return response({ revisions: [], events: [] });
+      }
+      if (url.endsWith("/revisions") && init?.method === "POST") {
+        return response({
+          code: "stale_revision",
+          message: "Architecture revision is stale",
+          currentRevisionId: "revision-b",
+        }, 409);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const user = userEvent.setup();
+    render(<GraphEditor dependencies={test.dependencies as never} roomId="room-a" />);
+
+    await screen.findByRole("button", { name: "Uploads" });
+    await user.type(
+      screen.getByRole("textbox", { name: "Rationale" }),
+      "Save the stale revision.",
+    );
+    await user.click(screen.getByRole("button", { name: "Save revision" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Architecture revision is stale. Current revision: revision-b.",
+    );
+  });
 });
