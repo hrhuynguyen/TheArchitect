@@ -773,6 +773,104 @@ databaseDescribe("Prisma architecture editing boundaries", () => {
         saveLive.destroy();
         operationLive.destroy();
       }
+
+      const winningSaveLive = await yjs.loadRoomDocument(room.id);
+      const losingOperationLive = await yjs.loadRoomDocument(room.id);
+      const winningSaveDocuments = createActiveDocumentRegistry({
+        loadRoomDocument: yjs.loadRoomDocument,
+      });
+      const losingOperationDocuments = createActiveDocumentRegistry({
+        loadRoomDocument: yjs.loadRoomDocument,
+      });
+      const deactivateWinningSave = await winningSaveDocuments.activate(
+        room.id,
+        winningSaveLive,
+      );
+      const deactivateLosingOperation =
+        await losingOperationDocuments.activate(room.id, losingOperationLive);
+      const operationPersistCaptured = deferred();
+      const releaseOperationPersist = deferred();
+      const winningSaveService = createRevisionService({
+        documents: winningSaveDocuments,
+        repository: revisions,
+        persistRoomSnapshot: yjs.persistRoomSnapshot,
+      });
+      const losingOperationService = createRevisionService({
+        documents: losingOperationDocuments,
+        repository: revisions,
+        persistRoomSnapshot: async (
+          operationRoomId,
+          candidate,
+          reason,
+          fence,
+        ) => {
+          operationPersistCaptured.resolve();
+          await releaseOperationPersist.promise;
+          return yjs.persistRoomSnapshot(
+            operationRoomId,
+            candidate,
+            reason,
+            fence,
+          );
+        },
+      });
+      try {
+        const losingOperation = losingOperationService.applyOperations({
+          roomId: room.id,
+          request: {
+            baseRevisionId: revisionId,
+            operations: [{
+              type: "update_resource",
+              resourceId: "bucket",
+              changes: { name: "Operation that must lose to save" },
+            }],
+          },
+        });
+        const losingOperationResult = expect(losingOperation).rejects
+          .toMatchObject({
+            code: "STALE_REVISION",
+            currentRevisionId: null,
+          });
+        await operationPersistCaptured.promise;
+
+        const saveResult = await winningSaveService.saveRevision({
+          roomId: room.id,
+          participantId: "participant-save-winner",
+          traceId: "request-save-winner",
+          request: {
+            baseRevisionId: revisionId,
+            rationale: "Save wins before the operation snapshot transaction.",
+          },
+        });
+        releaseOperationPersist.resolve();
+        await losingOperationResult;
+
+        expect(readState(losingOperationLive).architecture.architecture.resources)
+          .toContainEqual(expect.objectContaining({
+            id: "bucket",
+            name: "Operation before save commit",
+          }));
+        expect(await database.architectureRevision.count({
+          where: { roomId: room.id },
+        })).toBe(2);
+        expect(await database.historyEvent.count({
+          where: { roomId: room.id },
+        })).toBe(1);
+        expect(await database.yjsSnapshot.count({
+          where: { roomId: room.id },
+        })).toBe(4);
+        expect((await database.room.findUniqueOrThrow({
+          where: { id: room.id },
+        })).currentRevisionId).toBe(saveResult.revision.id);
+      } finally {
+        releaseOperationPersist.resolve();
+        await deactivateWinningSave();
+        await deactivateLosingOperation();
+        await winningSaveDocuments.destroy();
+        await losingOperationDocuments.destroy();
+        winningSaveLive.destroy();
+        losingOperationLive.destroy();
+      }
     } finally {
       initial.destroy();
       candidateA.destroy();

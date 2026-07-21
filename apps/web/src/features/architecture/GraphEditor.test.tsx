@@ -527,6 +527,33 @@ describe("GraphEditor", () => {
     );
   });
 
+  it("surfaces the bounded stale conflict when revision save beats an operation", async () => {
+    const test = setup();
+    test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/revisions") && !init?.method) {
+        return response({ revisions: [], events: [] });
+      }
+      if (url.endsWith("/operations")) {
+        return response({
+          code: "stale_revision",
+          message: "Architecture revision is stale",
+          currentRevisionId: null,
+        }, 409);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const user = userEvent.setup();
+    render(<GraphEditor dependencies={test.dependencies as never} roomId="room-a" />);
+
+    await user.click(await screen.findByRole("button", {
+      name: "Simulate node move",
+    }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Architecture revision is stale.",
+    );
+  });
+
   it("surfaces the bounded stale-revision conflict from a revision 409", async () => {
     const test = setup();
     test.fetchBoundary.mockImplementation(async (url: string, init?: RequestInit) => {

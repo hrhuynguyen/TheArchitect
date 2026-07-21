@@ -285,6 +285,28 @@ describe("authenticated architecture routes", () => {
     }
   });
 
+  it("maps a save-winning operation fence loss to a bounded stale 409", async () => {
+    const { app } = setup({
+      operationError: new ArchitectureServiceError("STALE_REVISION"),
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/rooms/${roomId}/operations`,
+        headers: { cookie: memberCookie() },
+        payload: operationBody,
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toEqual({
+        code: "stale_revision",
+        message: "Architecture revision is stale",
+        currentRevisionId: null,
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
   it("rejects malformed strict bodies before invoking the service", async () => {
     const { app, service } = setup();
     try {

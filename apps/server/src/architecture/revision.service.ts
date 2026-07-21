@@ -17,6 +17,7 @@ import * as Y from "yjs";
 import type { ActiveDocumentRegistry } from "../collab/active-document.registry.js";
 import {
   SnapshotProtectedStateLostError,
+  SnapshotRevisionLostError,
   type SnapshotProtectedStateFence,
 } from "../collab/yjs.repository.js";
 import type { RevisionRepository } from "./revision.repository.js";
@@ -208,6 +209,9 @@ export function createRevisionService({
             "WORKING_STATE_CONFLICT",
             state.architecture.revisionId,
           );
+        }
+        if (error instanceof SnapshotRevisionLostError) {
+          throw new ArchitectureServiceError("STALE_REVISION");
         }
         throw error;
       } finally {

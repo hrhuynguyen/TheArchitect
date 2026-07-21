@@ -9,7 +9,10 @@ import * as Y from "yjs";
 import { describe, expect, it, vi } from "vitest";
 
 import { createActiveDocumentRegistry } from "../collab/active-document.registry.js";
-import { SnapshotProtectedStateLostError } from "../collab/yjs.repository.js";
+import {
+  SnapshotProtectedStateLostError,
+  SnapshotRevisionLostError,
+} from "../collab/yjs.repository.js";
 import {
   ArchitectureServiceError,
   createRevisionService,
@@ -370,6 +373,23 @@ describe("revision service", () => {
       })).rejects.toEqual(new ArchitectureServiceError(
         "WORKING_STATE_CONFLICT",
         "revision-a",
+      ));
+      expect(test.events).toEqual(["persist:architecture_operations"]);
+      expect(liveState(test.live)).toEqual(initialState);
+    } finally {
+      await test.stop();
+    }
+  });
+
+  it("maps a save-winning room fence loss to a stable stale-revision conflict", async () => {
+    const test = await setup({ persistFailure: new SnapshotRevisionLostError() });
+    try {
+      await expect(test.service.applyOperations({
+        roomId: "room-a",
+        request: { baseRevisionId: "revision-a", operations: [addQueue] },
+      })).rejects.toEqual(new ArchitectureServiceError(
+        "STALE_REVISION",
+        null,
       ));
       expect(test.events).toEqual(["persist:architecture_operations"]);
       expect(liveState(test.live)).toEqual(initialState);
