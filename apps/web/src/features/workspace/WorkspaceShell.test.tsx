@@ -23,12 +23,38 @@ describe("PhaseRail", () => {
   it("marks the current workspace phase with text and aria-current", () => {
     render(<PhaseRail phase="architect" roomId="room-ada" />);
 
+    const current = screen.getByText("Architect").closest("a");
+    expect(current).toHaveAttribute("href", "/room/room-ada#architect");
+    expect(current).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(screen.getByText("Sketch").closest("a")).toBeNull();
+    expect(screen.getByText("Sketch").closest("[aria-disabled]")).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(screen.getByText("Deploy").closest("a")).toBeNull();
+  });
+
+  it("maps reconstructing to the architect content step", () => {
+    render(<PhaseRail phase="reconstructing" roomId="room-ada" />);
+
     expect(screen.getByText("Architect").closest("a")).toHaveAttribute(
       "aria-current",
       "step",
     );
-    expect(screen.getByText("Sketch")).toBeVisible();
-    expect(screen.getByText("Deploy")).toBeVisible();
+  });
+
+  it("makes deploy current without making unavailable phases actionable", () => {
+    render(<PhaseRail phase="deploy" roomId="room-ada" />);
+
+    expect(screen.getByText("Deploy").closest("a")).toHaveAttribute(
+      "href",
+      "/room/room-ada#deploy",
+    );
+    expect(screen.getByText("Sketch").closest("a")).toBeNull();
+    expect(screen.getByText("Architect").closest("a")).toBeNull();
   });
 });
 

@@ -21,7 +21,8 @@ export default function StartPage() {
           <h2 id="start-intro-title">Start with the people, then the system.</h2>
           <p>
             Every room follows the same durable path from sketch to architecture to
-            deployment. Invite collaborators now, or open a solo room and share later.
+            deployment. Invite collaborators to a shared room. Solo rooms stay private
+            and cannot accept collaborators.
           </p>
           <ol className="start-page__phases" aria-label="Workspace phases">
             <li><span>01</span> Sketch the intent</li>

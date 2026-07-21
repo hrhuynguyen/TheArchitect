@@ -2,7 +2,7 @@
 
 import { ParticipantProfileSchema, type RoomMode } from "@architect/contracts";
 import { Button, Field, StatusBadge } from "@architect/ui";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { roomApi, type RoomApi } from "./api";
 import {
   DEFAULT_PROFILE_COLOR,
@@ -17,17 +17,38 @@ type StartRoomProps = {
 
 type PendingAction = RoomMode | "join" | null;
 
-function roomIdFromInput(value: string): string | null {
-  const input = value.trim();
-  if (!input) return null;
-  const pathMatch = input.match(/(?:^|\/)room\/([^/?#]+)/i);
-  const candidate = pathMatch?.[1] ?? input.replace(/^\/+|\/+$/g, "");
-  if (!candidate || candidate.includes("/") || /\s/.test(candidate)) return null;
+function decodedRoomId(value: string): string | null {
   try {
-    return decodeURIComponent(candidate);
+    const decoded = decodeURIComponent(value);
+    return /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(decoded) ? decoded : null;
   } catch {
     return null;
   }
+}
+
+function roomIdFromPath(pathname: string): string | null {
+  const match = pathname.match(/^\/room\/([^/]+)$/);
+  return match ? decodedRoomId(match[1]!) : null;
+}
+
+function roomIdFromInput(value: string): string | null {
+  if (!value || value !== value.trim() || /\s/.test(value)) return null;
+
+  if (/^https?:\/\//.test(value)) {
+    try {
+      const url = new URL(value);
+      if (!/^https?:$/.test(url.protocol) || url.search || url.hash) return null;
+      return roomIdFromPath(url.pathname);
+    } catch {
+      return null;
+    }
+  }
+
+  if (value.includes("://")) return null;
+  if (value.startsWith("/room/") || value.startsWith("room/")) {
+    return roomIdFromPath(value.startsWith("/") ? value : `/${value}`);
+  }
+  return decodedRoomId(value);
 }
 
 export function StartRoom({ api = roomApi, onRoomReady }: StartRoomProps) {
@@ -36,10 +57,17 @@ export function StartRoom({ api = roomApi, onRoomReady }: StartRoomProps) {
   const [roomInput, setRoomInput] = useState("");
   const [pending, setPending] = useState<PendingAction>(null);
   const [error, setError] = useState<string | null>(null);
+  const mounted = useRef(false);
+  const requestGeneration = useRef(0);
 
   useEffect(() => {
+    mounted.current = true;
     const profile = loadGuestProfile();
     if (profile) setName(profile.name);
+    return () => {
+      mounted.current = false;
+      requestGeneration.current += 1;
+    };
   }, []);
 
   const profile = useMemo(
@@ -54,33 +82,43 @@ export function StartRoom({ api = roomApi, onRoomReady }: StartRoomProps) {
     else window.location.assign(`/room/${encodeURIComponent(roomId)}`);
   }
 
+  function isCurrentRequest(generation: number) {
+    return mounted.current && requestGeneration.current === generation;
+  }
+
   async function create(mode: RoomMode) {
     if (!profile.success) return;
+    const generation = ++requestGeneration.current;
     setError(null);
     setPending(mode);
     try {
       const created = await api.create(profile.data, mode);
+      if (!isCurrentRequest(generation)) return;
       saveGuestProfile(profile.data);
       navigate(created.id);
     } catch (reason) {
+      if (!isCurrentRequest(generation)) return;
       setError(reason instanceof Error ? reason.message : "Unable to create the room.");
     } finally {
-      setPending(null);
+      if (isCurrentRequest(generation)) setPending(null);
     }
   }
 
   async function join() {
     if (!profile.success || !parsedRoomId) return;
+    const generation = ++requestGeneration.current;
     setError(null);
     setPending("join");
     try {
       const joined = await api.join(parsedRoomId, profile.data);
+      if (!isCurrentRequest(generation)) return;
       saveGuestProfile(profile.data);
       navigate(joined.id);
     } catch (reason) {
+      if (!isCurrentRequest(generation)) return;
       setError(reason instanceof Error ? reason.message : "Unable to join the room.");
     } finally {
-      setPending(null);
+      if (isCurrentRequest(generation)) setPending(null);
     }
   }
 

@@ -64,4 +64,42 @@ describe("roomApi", () => {
       status: 404,
     });
   });
+
+  it("normalizes fetch rejections to a stable public network error", async () => {
+    const api = createRoomApi(
+      vi.fn().mockRejectedValue(new TypeError("fetch failed for private-host:3001")),
+    );
+
+    const error = await api.get("room-ada").catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(RoomApiError);
+    expect(error).toMatchObject({
+      message: "Unable to reach the room service. Check your connection and try again.",
+      code: "room_network_error",
+      status: 0,
+    });
+  });
+
+  it("preserves an existing RoomApiError rejected by the fetch boundary", async () => {
+    const existing = new RoomApiError("Known room error", 409, "known_room_error");
+    const api = createRoomApi(vi.fn().mockRejectedValue(existing));
+
+    await expect(api.get("room-ada")).rejects.toBe(existing);
+  });
+
+  it("gets the latest room summary without using a browser cache", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(validRoom), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const api = createRoomApi(fetcher);
+
+    await expect(api.get("room-ada")).resolves.toMatchObject({ id: "room-ada" });
+    expect(fetcher).toHaveBeenCalledWith("/api/rooms/room-ada", {
+      cache: "no-store",
+      credentials: "include",
+    });
+  });
 });

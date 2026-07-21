@@ -11,12 +11,12 @@ const phases = [
   { id: "deploy", label: "Deploy", description: "Ship with evidence" },
 ] as const;
 
-function visiblePhase(phase: RoomPhase) {
+export function visibleWorkspacePhase(phase: RoomPhase) {
   return phase === "reconstructing" ? "architect" : phase;
 }
 
 export function PhaseRail({ phase, roomId }: PhaseRailProps) {
-  const current = visiblePhase(phase);
+  const current = visibleWorkspacePhase(phase);
 
   return (
     <nav className="phase-rail" aria-label="Workspace phases">
@@ -25,13 +25,9 @@ export function PhaseRail({ phase, roomId }: PhaseRailProps) {
         <span>The Architect</span>
       </a>
       <ol className="phase-rail__steps">
-        {phases.map((item, index) => (
-          <li key={item.id}>
-            <a
-              className="phase-rail__link"
-              href={`/room/${encodeURIComponent(roomId)}#${item.id}`}
-              aria-current={current === item.id ? "step" : undefined}
-            >
+        {phases.map((item, index) => {
+          const content = (
+            <>
               <span className="phase-rail__number" aria-hidden="true">
                 {index + 1}
               </span>
@@ -39,9 +35,27 @@ export function PhaseRail({ phase, roomId }: PhaseRailProps) {
                 <span className="phase-rail__label">{item.label}</span>
                 <span className="phase-rail__description">{item.description}</span>
               </span>
-            </a>
-          </li>
-        ))}
+            </>
+          );
+
+          return (
+            <li key={item.id}>
+              {current === item.id ? (
+                <a
+                  className="phase-rail__link"
+                  href={`/room/${encodeURIComponent(roomId)}#${item.id}`}
+                  aria-current="step"
+                >
+                  {content}
+                </a>
+              ) : (
+                <span className="phase-rail__link" aria-disabled="true">
+                  {content}
+                </span>
+              )}
+            </li>
+          );
+        })}
       </ol>
       <p className="phase-rail__note">Guided workspace</p>
     </nav>

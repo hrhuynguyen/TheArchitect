@@ -46,10 +46,20 @@ async function request<T>(
   schema: ResponseSchema<T>,
   init?: RequestInit,
 ): Promise<T> {
-  const response = await fetcher(path, {
-    credentials: "include",
-    ...init,
-  });
+  let response: Response;
+  try {
+    response = await fetcher(path, {
+      credentials: "include",
+      ...init,
+    });
+  } catch (reason) {
+    if (reason instanceof RoomApiError) throw reason;
+    throw new RoomApiError(
+      "Unable to reach the room service. Check your connection and try again.",
+      0,
+      "room_network_error",
+    );
+  }
   const body = await responseBody(response);
 
   if (!response.ok) {
@@ -105,6 +115,7 @@ export function createRoomApi(fetcher: Fetcher = globalThis.fetch): RoomApi {
         fetcher,
         `/api/rooms/${encodeURIComponent(roomId)}`,
         RoomSummarySchema,
+        { cache: "no-store" },
       );
     },
   };

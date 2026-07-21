@@ -406,6 +406,10 @@ a {
   background: color-mix(in srgb, var(--panel) 58%, transparent);
 }
 
+.phase-rail__link[aria-disabled="true"] {
+  cursor: default;
+}
+
 .phase-rail__link[aria-current="step"] {
   background: var(--panel);
   color: var(--ink);

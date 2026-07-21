@@ -4,6 +4,7 @@ import type { RoomSummary } from "@architect/contracts";
 import { Button, StatusBadge } from "@architect/ui";
 import { use, useEffect, useState } from "react";
 import { RoomApiError, roomApi } from "../../../features/rooms/api";
+import { visibleWorkspacePhase } from "../../../features/workspace/PhaseRail";
 import { WorkspaceShell } from "../../../features/workspace/WorkspaceShell";
 
 type RoomPageProps = {
@@ -15,6 +16,25 @@ type LoadState =
   | { status: "ready"; room: RoomSummary }
   | { status: "not-found" }
   | { status: "error"; message: string };
+
+const phaseContent = {
+  sketch: {
+    kicker: "Sketch workspace ready",
+    heading: "Start with the shape of the system.",
+    description:
+      "The guided canvas will hold the shared model here. Your room and its participants are already durable.",
+  },
+  architect: {
+    kicker: "Architect workspace ready",
+    heading: "Shape the system into a buildable plan.",
+    description: "Architecture decisions and constraints will stay visible here.",
+  },
+  deploy: {
+    kicker: "Deploy workspace ready",
+    heading: "Move forward with the evidence in view.",
+    description: "Deployment controls and evidence will stay visible here.",
+  },
+} as const;
 
 export default function RoomPage({ params }: RoomPageProps) {
   const { roomId } = use(params);
@@ -85,6 +105,8 @@ export default function RoomPage({ params }: RoomPageProps) {
   }
 
   const { room } = state;
+  const visiblePhase = visibleWorkspacePhase(room.phase);
+  const content = phaseContent[visiblePhase];
   return (
     <WorkspaceShell
       room={room}
@@ -94,7 +116,7 @@ export default function RoomPage({ params }: RoomPageProps) {
           <h2>{room.isOwner ? "You own this room" : "You joined this room"}</h2>
           <p>
             {room.mode === "solo"
-              ? "This durable workspace is private to this browser profile."
+              ? "This durable workspace is private and cannot accept collaborators."
               : "Share this path to invite another collaborator."}
           </p>
           {room.mode === "shared" ? (
@@ -103,14 +125,11 @@ export default function RoomPage({ params }: RoomPageProps) {
         </>
       }
     >
-      <div className="workspace-empty" id="sketch">
+      <div className="workspace-empty" id={visiblePhase}>
         <span className="workspace-empty__mark" aria-hidden="true" />
-        <p className="section-kicker">Sketch workspace ready</p>
-        <h1>Start with the shape of the system.</h1>
-        <p>
-          The guided canvas will hold the shared model here. Your room and its
-          participants are already durable.
-        </p>
+        <p className="section-kicker">{content.kicker}</p>
+        <h1>{content.heading}</h1>
+        <p>{content.description}</p>
       </div>
     </WorkspaceShell>
   );
