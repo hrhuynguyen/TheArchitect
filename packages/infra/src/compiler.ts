@@ -3,6 +3,7 @@ import {
   deploymentPlanSchema,
   diagnosticSchema,
   infrastructureIntentSchema,
+  stageDecisionSchema,
   type Architecture,
   type ArchitectureRelationship,
   type ArchitectureResource,
@@ -14,6 +15,7 @@ import {
   type InfrastructureZone,
   type ResourceOrigin,
   type StageDecision,
+  type StageUpgradeProposal,
 } from "@architect/contracts/infrastructure";
 import {
   requirementsProfileSchema,
@@ -73,10 +75,14 @@ function compareText(left: string, right: string): number {
 }
 
 function canonicalProperties(properties: Record<string, string | number | boolean>): string {
-  return JSON.stringify(
-    Object.fromEntries(
-      Object.entries(properties).sort(([left], [right]) => compareText(left, right)),
-    ),
+  return JSON.stringify(canonicalizeProperties(properties));
+}
+
+function canonicalizeProperties(
+  properties: Record<string, string | number | boolean>,
+): Record<string, string | number | boolean> {
+  return Object.fromEntries(
+    Object.entries(properties).sort(([left], [right]) => compareText(left, right)),
   );
 }
 
@@ -155,10 +161,7 @@ function originFor(resources: WorkingResource[]): ResourceOrigin {
   if (resources.some((resource) => resource.origin === "stage-upgrade")) {
     return "stage-upgrade";
   }
-  if (resources.some((resource) => resource.origin === "inferred-minimal")) {
-    return "inferred-minimal";
-  }
-  return "explicit";
+  return "inferred-minimal";
 }
 
 function zoneFor(resource: InfrastructureIntentResource): InfrastructureZone {
@@ -172,6 +175,134 @@ function zoneFor(resource: InfrastructureIntentResource): InfrastructureZone {
     return "private";
   }
   return "regional";
+}
+
+function reconcileStageDecision(
+  recommendation: StageDecision,
+  architecture: Architecture,
+): StageDecision {
+  const pendingResources = architecture.resources.filter(
+    (resource) =>
+      resource.origin === "stage-upgrade" && resource.approvalStatus === "pending",
+  );
+  const pendingRelationships = architecture.relationships.filter(
+    (relationship) =>
+      relationship.origin === "stage-upgrade" &&
+      relationship.approvalStatus === "pending",
+  );
+  const pendingResourceIds = new Set(pendingResources.map((resource) => resource.id));
+  const assignedResourceIds = new Set<string>();
+  const proposedUpgrades: StageUpgradeProposal[] = [];
+
+  const addProposal = (
+    id: string,
+    title: string,
+    summary: string,
+    resourceIds: string[],
+  ): void => {
+    const affects = [...new Set(resourceIds)].sort(compareText);
+    if (affects.length === 0) return;
+    affects.forEach((resourceId) => assignedResourceIds.add(resourceId));
+    proposedUpgrades.push({ id, title, summary, affects });
+  };
+
+  const hasPendingIngress = pendingResources.some((resource) => resource.type === "ELB");
+  if (hasPendingIngress) {
+    addProposal(
+      "redundant-ingress",
+      "Add redundant ingress",
+      "Add reviewed load-balancer and subnet capacity for internet-facing traffic.",
+      pendingResources
+        .filter((resource) => resource.type === "ELB" || resource.type === "Subnet")
+        .map((resource) => resource.id),
+    );
+  }
+
+  addProposal(
+    "redundant-compute",
+    "Add redundant compute",
+    "Add independent compute capacity for the selected workload stage.",
+    pendingResources
+      .filter((resource) => resource.type === "EC2")
+      .map((resource) => resource.id),
+  );
+
+  addProposal(
+    "multi-zone-networking",
+    "Use multiple availability zones",
+    "Add reviewed subnet capacity in another availability zone.",
+    pendingResources
+      .filter(
+        (resource) =>
+          resource.type === "Subnet" && !assignedResourceIds.has(resource.id),
+      )
+      .map((resource) => resource.id),
+  );
+
+  addProposal(
+    "topology-upgrades",
+    "Apply topology upgrades",
+    "Apply the remaining graph-specific stage resources.",
+    pendingResources
+      .filter((resource) => !assignedResourceIds.has(resource.id))
+      .map((resource) => resource.id),
+  );
+
+  const relationshipOnlyResourceIds = pendingRelationships.flatMap((relationship) =>
+    [relationship.sourceId, relationship.targetId].filter(
+      (resourceId) => !pendingResourceIds.has(resourceId),
+    ),
+  );
+  addProposal(
+    "topology-relationships",
+    "Review topology relationships",
+    "Apply graph-specific relationships between existing resources.",
+    relationshipOnlyResourceIds,
+  );
+
+  proposedUpgrades.sort((left, right) => compareText(left.id, right.id));
+  return stageDecisionSchema.parse({
+    ...recommendation,
+    requiresApproval: proposedUpgrades.length > 0,
+    proposedUpgrades,
+  });
+}
+
+function deriveVpcAvailabilityZones(architecture: Architecture): Architecture {
+  const resourcesById = new Map(
+    architecture.resources.map((resource) => [resource.id, resource]),
+  );
+  const resources = architecture.resources.map((resource) => {
+    if (resource.type !== "VPC" || resource.origin !== "inferred-minimal") {
+      return resource;
+    }
+    const availabilityZones = new Set<string>();
+    for (const relationship of architecture.relationships) {
+      if (
+        relationship.kind !== "contains" ||
+        relationship.sourceId !== resource.id ||
+        relationship.approvalStatus === "rejected"
+      ) {
+        continue;
+      }
+      const target = resourcesById.get(relationship.targetId);
+      if (target?.type !== "Subnet" || target.approvalStatus === "rejected") continue;
+      const availabilityZone = target.properties.availabilityZone;
+      availabilityZones.add(
+        typeof availabilityZone === "string" ? availabilityZone : "primary",
+      );
+    }
+    if (availabilityZones.size === 0) return resource;
+    return {
+      ...resource,
+      properties: canonicalizeProperties({
+        ...resource.properties,
+        maxAvailabilityZones: availabilityZones.size,
+      }),
+    };
+  });
+
+  return architectureSchema.parse({ ...architecture, resources });
 }
 
 function compileCore(
@@ -435,11 +566,11 @@ function compileCore(
     }
   }
 
-  const stageDecision = selectStage(requirements);
+  const stageRecommendation = selectStage(requirements);
   const desiredComputeCount =
-    stageDecision.stage === "production"
+    stageRecommendation.stage === "production"
       ? 3
-      : stageDecision.stage === "growth"
+      : stageRecommendation.stage === "growth"
         ? 2
         : 1;
   const originalCompute = resourcesOfType("EC2").filter(
@@ -458,7 +589,7 @@ function compileCore(
         name: nameWithSuffix(primaryCompute.name, ` replica ${index}`),
         properties: { ...primaryCompute.properties, stageUpgrade: true },
         origin: "stage-upgrade",
-        reason: `The ${stageDecision.stage} stage proposes redundant compute capacity.`,
+        reason: `The ${stageRecommendation.stage} stage proposes redundant compute capacity.`,
         approvalStatus: "pending",
         zone: primaryCompute.zone,
       });
@@ -472,8 +603,8 @@ function compileCore(
   );
   let stagedIngress: WorkingResource | undefined;
   if (
-    stageDecision.stage !== "prototype" &&
-    stageDecision.stage !== "mvp" &&
+    stageRecommendation.stage !== "prototype" &&
+    stageRecommendation.stage !== "mvp" &&
     directExternalComputeIds.size > 0 &&
     !hasExplicitIngress
   ) {
@@ -483,7 +614,7 @@ function compileCore(
       name: "Recommended load balancer",
       properties: { scheme: "internet-facing", stageUpgrade: true },
       origin: "stage-upgrade",
-      reason: `The ${stageDecision.stage} stage proposes managed ingress before EC2.`,
+      reason: `The ${stageRecommendation.stage} stage proposes managed ingress before EC2.`,
       approvalStatus: "pending",
       zone: "public",
     });
@@ -494,11 +625,28 @@ function compileCore(
       resource.zone === "public" || resource.properties.subnetType === "public",
   );
   const needsStagedPublicSubnet = Boolean(stagedIngress) && stagedPublicSubnets.length < 2;
+  const stagedComputeExists = resourcesOfType("EC2").some(
+    (resource) => resource.origin === "stage-upgrade",
+  );
+  const computeUsesPublicSubnets = primaryCompute?.zone === "public";
+  const compatibleComputeSubnetCount = resourcesOfType("Subnet").filter((resource) =>
+    computeUsesPublicSubnets
+      ? resource.zone === "public" || resource.properties.subnetType === "public"
+      : resource.zone !== "public" && resource.properties.subnetType !== "public",
+  ).length;
+  const needsStagedComputeSubnet =
+    stagedComputeExists && compatibleComputeSubnetCount < 2;
   const needsProductionSubnet =
-    stageDecision.stage === "production" &&
+    stageRecommendation.stage === "production" &&
     resourcesOfType("Subnet").length < 2;
-  if (hasType("VPC") && (needsStagedPublicSubnet || needsProductionSubnet)) {
-    const publicUpgrade = needsStagedPublicSubnet || directExternalComputeIds.size > 0;
+  if (
+    hasType("VPC") &&
+    (needsStagedPublicSubnet || needsStagedComputeSubnet || needsProductionSubnet)
+  ) {
+    const publicUpgrade =
+      needsStagedPublicSubnet ||
+      (needsStagedComputeSubnet && computeUsesPublicSubnets) ||
+      directExternalComputeIds.size > 0;
     addGeneratedResource({
       requestedId: "stage-subnet-secondary",
       type: "Subnet",
@@ -509,7 +657,7 @@ function compileCore(
         stageUpgrade: true,
       },
       origin: "stage-upgrade",
-      reason: `The ${stageDecision.stage} stage proposes capacity in a second availability zone.`,
+      reason: `The ${stageRecommendation.stage} stage proposes capacity in a second availability zone.`,
       approvalStatus: "pending",
       zone: publicUpgrade ? "public" : "private",
     });
@@ -607,7 +755,7 @@ function compileCore(
     }
   }
 
-  const vpc = resourcesOfType("VPC")[0];
+  const vpcs = resourcesOfType("VPC");
   const subnets = resourcesOfType("Subnet");
   const publicSubnets = subnets.filter(
     (resource) =>
@@ -616,51 +764,94 @@ function compileCore(
   const privateSubnets = subnets.filter(
     (resource) => !publicSubnets.some((candidate) => candidate.id === resource.id),
   );
-  const securityGroup = resourcesOfType("SecurityGroup")[0];
-  if (vpc) {
-    for (const subnet of subnets) {
-      addRelationship({
-        source: vpc,
-        target: subnet,
-        kind: "contains",
-        reason: "The subnet is contained by the selected VPC.",
+  const securityGroups = resourcesOfType("SecurityGroup");
+  const attachToVpc = (target: WorkingResource): void => {
+    const hasExplicitAttachment = relationships.some(
+      (relationship) =>
+        relationship.origin === "explicit" &&
+        relationship.kind === "contains" &&
+        relationship.targetId === target.id &&
+        vpcs.some((candidate) => candidate.id === relationship.sourceId),
+    );
+    if (hasExplicitAttachment || vpcs.length === 0) return;
+    if (vpcs.length > 1) {
+      diagnostics.push({
+        level: "error",
+        code: "AMBIGUOUS_VPC_ATTACHMENT",
+        message: `${target.name} cannot be attached because multiple VPC candidates exist.`,
+        resourceId: target.id,
+        suggestion: "Add an explicit contains relationship from the intended VPC.",
       });
+      return;
     }
-    if (securityGroup) {
-      addRelationship({
-        source: vpc,
-        target: securityGroup,
-        kind: "contains",
-        reason: "The security group belongs to the selected VPC.",
-      });
-    }
-  }
+    const [vpc] = vpcs;
+    if (!vpc) return;
+    addRelationship({
+      source: vpc,
+      target,
+      kind: "contains",
+      reason: `${target.name} requires an unambiguous VPC attachment.`,
+    });
+  };
+
+  for (const subnet of subnets) attachToVpc(subnet);
+  for (const securityGroup of securityGroups) attachToVpc(securityGroup);
 
   const placementOffsets = new Map<string, number>();
   for (const hosted of resources
     .filter((resource) => HOSTED_TYPES.has(resource.type))
     .sort((left, right) => compareText(left.id, right.id))) {
-    const preferred = hosted.zone === "public" ? publicSubnets : privateSubnets;
-    const candidates = preferred.length > 0 ? preferred : subnets;
-    const placementKey = hosted.zone === "public" ? "public" : "private";
-    const offset = placementOffsets.get(placementKey) ?? 0;
-    const selectedSubnets =
-      hosted.type === "ELB"
-        ? candidates
-        : candidates.length > 0
-          ? [candidates[offset % candidates.length]!]
-          : [];
-    if (hosted.type !== "ELB" && candidates.length > 0) {
-      placementOffsets.set(placementKey, offset + 1);
+    const hasExplicitHosting = relationships.some(
+      (relationship) =>
+        relationship.origin === "explicit" &&
+        relationship.kind === "hosts" &&
+        relationship.targetId === hosted.id &&
+        subnets.some((candidate) => candidate.id === relationship.sourceId),
+    );
+    if (!hasExplicitHosting) {
+      const preferred = hosted.zone === "public" ? publicSubnets : privateSubnets;
+      const candidates = preferred.length > 0 ? preferred : subnets;
+      const placementKey = hosted.zone === "public" ? "public" : "private";
+      const offset = placementOffsets.get(placementKey) ?? 0;
+      const selectedSubnets =
+        hosted.type === "ELB"
+          ? candidates
+          : candidates.length > 0
+            ? [candidates[offset % candidates.length]!]
+            : [];
+      if (hosted.type !== "ELB" && candidates.length > 0) {
+        placementOffsets.set(placementKey, offset + 1);
+      }
+      for (const subnet of selectedSubnets) {
+        addRelationship({
+          source: subnet,
+          target: hosted,
+          kind: "hosts",
+          reason: "The workload requires placement in a compatible subnet.",
+        });
+      }
     }
-    for (const subnet of selectedSubnets) {
-      addRelationship({
-        source: subnet,
-        target: hosted,
-        kind: "hosts",
-        reason: "The workload requires placement in a compatible subnet.",
+    const hasExplicitProtection = relationships.some(
+      (relationship) =>
+        relationship.origin === "explicit" &&
+        relationship.kind === "protects" &&
+        relationship.targetId === hosted.id &&
+        securityGroups.some(
+          (candidate) => candidate.id === relationship.sourceId,
+        ),
+    );
+    if (hasExplicitProtection) continue;
+    if (securityGroups.length > 1) {
+      diagnostics.push({
+        level: "error",
+        code: "AMBIGUOUS_SECURITY_GROUP_ATTACHMENT",
+        message: `${hosted.name} cannot be protected because multiple security-group candidates exist.`,
+        resourceId: hosted.id,
+        suggestion: "Add an explicit protects relationship from the intended security group.",
       });
+      continue;
     }
+    const [securityGroup] = securityGroups;
     if (securityGroup) {
       addRelationship({
         source: securityGroup,
@@ -698,20 +889,24 @@ function compileCore(
   }
 
   const semanticResources = resources
-    .map(({ sourceId: _sourceId, zone: _zone, ...resource }) => resource)
+    .map(({ sourceId: _sourceId, ...resource }) => ({
+      ...resource,
+      properties: canonicalizeProperties(resource.properties),
+    }))
     .sort((left, right) => compareText(left.id, right.id));
   const semanticRelationships = relationships.sort((left, right) =>
     compareText(left.id, right.id),
   );
 
-  const architecture = architectureSchema.parse({
+  const architecture = deriveVpcAvailabilityZones(architectureSchema.parse({
     version: "architecture/v1",
     requirements,
     resources: semanticResources,
     relationships: semanticRelationships,
     decisions: [],
     unresolvedQuestions: [],
-  });
+  }));
+  const stageDecision = reconcileStageDecision(stageRecommendation, architecture);
 
   for (const resource of architecture.resources) {
     const capability = RESOURCE_CATALOG[resource.type];
@@ -740,14 +935,27 @@ function compileCore(
     )
     .map((resource) => resource.id)
     .sort();
+  const pendingApprovalRelationshipIds = architecture.relationships
+    .filter(
+      (relationship) =>
+        relationship.origin === "stage-upgrade" &&
+        relationship.approvalStatus === "pending",
+    )
+    .map((relationship) => relationship.id)
+    .sort();
   const deploymentPlan = deploymentPlanSchema.parse({
     version: "deployment-plan/v1",
     stage: stageDecision.stage,
-    requiresApproval: architecture.resources.some(
-      (resource) => resource.origin === "stage-upgrade",
-    ),
-    approvalsSatisfied: pendingApprovalResourceIds.length === 0,
+    requiresApproval:
+      architecture.resources.some((resource) => resource.origin === "stage-upgrade") ||
+      architecture.relationships.some(
+        (relationship) => relationship.origin === "stage-upgrade",
+      ),
+    approvalsSatisfied:
+      pendingApprovalResourceIds.length === 0 &&
+      pendingApprovalRelationshipIds.length === 0,
     pendingApprovalResourceIds,
+    pendingApprovalRelationshipIds,
     architecture,
   });
 
@@ -801,9 +1009,9 @@ export function materializeApprovedArchitecture(
       resourceIds.has(relationship.targetId),
   );
 
-  return architectureSchema.parse({
+  return deriveVpcAvailabilityZones(architectureSchema.parse({
     ...validatedPlan.architecture,
     resources,
     relationships,
-  });
+  }));
 }

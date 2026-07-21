@@ -26,10 +26,14 @@ export const resourceCapabilitySchema = z
 
 export type ResourceCapability = z.infer<typeof resourceCapabilitySchema>;
 
+function freezeCapability(capability: ResourceCapability): ResourceCapability {
+  return Object.freeze(capability);
+}
+
 const deployable = (
   label: string,
   category: ResourceCapability["category"],
-): ResourceCapability => ({
+): ResourceCapability => freezeCapability({
   label,
   category,
   diagramSupported: true,
@@ -42,7 +46,7 @@ const deployable = (
 const unsupported = (
   label: string,
   category: ResourceCapability["category"],
-): ResourceCapability => ({
+): ResourceCapability => freezeCapability({
   label,
   category,
   diagramSupported: true,
@@ -53,7 +57,7 @@ const unsupported = (
 });
 
 export const RESOURCE_CATALOG = Object.freeze({
-  External: {
+  External: freezeCapability({
     label: "External actor",
     category: "actor",
     diagramSupported: true,
@@ -61,7 +65,7 @@ export const RESOURCE_CATALOG = Object.freeze({
     synthSupported: false,
     localStackSupported: false,
     awsSupported: false,
-  },
+  }),
   EC2: deployable("Amazon EC2", "compute"),
   S3: deployable("Amazon S3", "storage"),
   Lambda: deployable("AWS Lambda", "compute"),

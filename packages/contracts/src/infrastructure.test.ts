@@ -76,6 +76,59 @@ describe("infrastructure contracts", () => {
     ).toThrow();
   });
 
+  it("rejects resource property keys longer than 120 characters", () => {
+    expect(() =>
+      infrastructureIntentSchema.parse({
+        version: "infrastructure-intent/v1",
+        resources: [
+          {
+            id: "bucket",
+            type: "S3",
+            name: "Uploads",
+            properties: { ["k".repeat(121)]: "value" },
+          },
+        ],
+        relationships: [],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects resources with more than 100 properties", () => {
+    expect(() =>
+      infrastructureIntentSchema.parse({
+        version: "infrastructure-intent/v1",
+        resources: [
+          {
+            id: "bucket",
+            type: "S3",
+            name: "Uploads",
+            properties: Object.fromEntries(
+              Array.from({ length: 101 }, (_, index) => [`key-${index}`, index]),
+            ),
+          },
+        ],
+        relationships: [],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects resource property strings longer than 4096 characters", () => {
+    expect(() =>
+      infrastructureIntentSchema.parse({
+        version: "infrastructure-intent/v1",
+        resources: [
+          {
+            id: "bucket",
+            type: "S3",
+            name: "Uploads",
+            properties: { description: "x".repeat(4_097) },
+          },
+        ],
+        relationships: [],
+      }),
+    ).toThrow();
+  });
+
   it("models provenance and stage approvals explicitly", () => {
     expect(resourceOriginSchema.options).toEqual([
       "explicit",
@@ -95,6 +148,24 @@ describe("infrastructure contracts", () => {
     });
 
     expect(pending.approvalStatus).toBe("pending");
+  });
+
+  it("preserves an optional strict semantic resource zone", () => {
+    const resource = architectureResourceSchema.parse({
+      id: "app",
+      type: "EC2",
+      name: "Application",
+      zone: "private",
+      properties: {},
+      origin: "explicit",
+      reason: "Drawn on the whiteboard.",
+      approvalStatus: "not-required",
+    });
+
+    expect(resource.zone).toBe("private");
+    expect(() =>
+      architectureResourceSchema.parse({ ...resource, zone: "somewhere" }),
+    ).toThrow();
   });
 
   it("rejects duplicate resources and dangling semantic relationships", () => {
@@ -136,6 +207,22 @@ describe("infrastructure contracts", () => {
           },
         ],
         decisions: [],
+        unresolvedQuestions: [],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects duplicate architecture decision IDs", () => {
+    expect(
+      architectureSchema.safeParse({
+        version: "architecture/v1",
+        requirements: defaultRequirementsProfile(),
+        resources: [],
+        relationships: [],
+        decisions: [
+          { id: "decision", summary: "First", rationale: "First rationale." },
+          { id: "decision", summary: "Second", rationale: "Second rationale." },
+        ],
         unresolvedQuestions: [],
       }).success,
     ).toBe(false);
@@ -184,9 +271,80 @@ describe("infrastructure contracts", () => {
         requiresApproval: true,
         approvalsSatisfied: false,
         pendingApprovalResourceIds: ["stage-elb"],
+        pendingApprovalRelationshipIds: [],
         architecture,
       }),
     ).toMatchObject({ stage: "growth", approvalsSatisfied: false });
+  });
+
+  it("treats pending stage relationships as first-class approval facts", () => {
+    const architecture = architectureSchema.parse({
+      version: "architecture/v1",
+      requirements: defaultRequirementsProfile(),
+      resources: [
+        {
+          id: "client",
+          type: "External",
+          name: "Client",
+          zone: "edge",
+          properties: {},
+          origin: "explicit",
+          reason: "Drawn on the whiteboard.",
+          approvalStatus: "not-required",
+        },
+        {
+          id: "app",
+          type: "EC2",
+          name: "Application",
+          zone: "public",
+          properties: {},
+          origin: "explicit",
+          reason: "Drawn on the whiteboard.",
+          approvalStatus: "not-required",
+        },
+      ],
+      relationships: [
+        {
+          id: "stage-client-routes-app",
+          sourceId: "client",
+          targetId: "app",
+          kind: "routes",
+          origin: "stage-upgrade",
+          reason: "Proposed route.",
+          approvalStatus: "pending",
+        },
+      ],
+      decisions: [],
+      unresolvedQuestions: [],
+    });
+
+    expect(
+      deploymentPlanSchema.parse({
+        version: "deployment-plan/v1",
+        stage: "growth",
+        requiresApproval: true,
+        approvalsSatisfied: false,
+        pendingApprovalResourceIds: [],
+        pendingApprovalRelationshipIds: ["stage-client-routes-app"],
+        architecture,
+      }),
+    ).toMatchObject({
+      requiresApproval: true,
+      approvalsSatisfied: false,
+      pendingApprovalRelationshipIds: ["stage-client-routes-app"],
+    });
+
+    expect(
+      deploymentPlanSchema.safeParse({
+        version: "deployment-plan/v1",
+        stage: "growth",
+        requiresApproval: true,
+        approvalsSatisfied: true,
+        pendingApprovalResourceIds: [],
+        pendingApprovalRelationshipIds: [],
+        architecture,
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects contradictory stage and deployment approval facts", () => {
@@ -254,6 +412,7 @@ describe("infrastructure contracts", () => {
           version: "deployment-plan/v1",
           stage: "growth",
           architecture,
+          pendingApprovalRelationshipIds: [],
           ...invalid,
         }).success,
       ).toBe(false);

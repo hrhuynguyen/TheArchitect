@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { AWS_RESOURCE_TYPES } from "@architect/contracts/infrastructure";
+import { defaultRequirementsProfile } from "@architect/contracts/requirements";
 
 import {
   RESOURCE_CATALOG,
   resourceCapabilitySchema,
 } from "./catalog.js";
+import { compileIntent } from "./compiler.js";
 
 describe("RESOURCE_CATALOG", () => {
   it("defines a strict capability record for every allowlisted type", () => {
@@ -58,5 +60,30 @@ describe("RESOURCE_CATALOG", () => {
         awsSupported: true,
       });
     }
+  });
+
+  it("deep-freezes capability entries so mutation cannot change compiler gates", () => {
+    const compileMsk = () =>
+      compileIntent(
+        {
+          version: "infrastructure-intent/v1",
+          resources: [{ id: "events", type: "MSK", name: "Events", properties: {} }],
+          relationships: [],
+        },
+        defaultRequirementsProfile(),
+      );
+
+    expect(Object.isFrozen(RESOURCE_CATALOG)).toBe(true);
+    expect(Object.values(RESOURCE_CATALOG).every(Object.isFrozen)).toBe(true);
+    expect(() => {
+      (RESOURCE_CATALOG.MSK as { synthSupported: boolean }).synthSupported = true;
+    }).toThrow(TypeError);
+    expect(compileMsk().diagnostics).toContainEqual(
+      expect.objectContaining({
+        level: "error",
+        code: "UNSUPPORTED_SYNTH_RESOURCE",
+        resourceId: "events",
+      }),
+    );
   });
 });

@@ -37,14 +37,16 @@ export const infrastructureZoneSchema = z.enum([
 export type InfrastructureZone = z.infer<typeof infrastructureZoneSchema>;
 
 export const resourcePropertyValueSchema = z.union([
-  z.string(),
+  z.string().max(4_096),
   z.number().finite(),
   z.boolean(),
 ]);
 export const resourcePropertiesSchema = z.record(
-  z.string().min(1),
+  z.string().min(1).max(120),
   resourcePropertyValueSchema,
-);
+).refine((properties) => Object.keys(properties).length <= 100, {
+  message: "Resources support at most 100 properties.",
+});
 
 const intentResourceFields = {
   id: z.string().trim().min(1).max(120),
@@ -167,6 +169,7 @@ export const architectureResourceSchema = z
     id: z.string().trim().min(1).max(120),
     type: awsResourceTypeSchema,
     name: z.string().trim().min(1).max(120),
+    zone: infrastructureZoneSchema.optional(),
     properties: resourcePropertiesSchema,
     origin: resourceOriginSchema,
     reason: z.string().trim().min(1).max(500),
@@ -254,6 +257,18 @@ export const architectureSchema = z
         });
       }
     }
+
+    const decisionIds = new Set<string>();
+    for (const [index, decision] of architecture.decisions.entries()) {
+      if (decisionIds.has(decision.id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["decisions", index, "id"],
+          message: `Duplicate architecture decision id: ${decision.id}`,
+        });
+      }
+      decisionIds.add(decision.id);
+    }
   });
 export const ArchitectureSchema = architectureSchema;
 export type Architecture = z.infer<typeof architectureSchema>;
@@ -331,6 +346,9 @@ export const deploymentPlanSchema = z
     requiresApproval: z.boolean(),
     approvalsSatisfied: z.boolean(),
     pendingApprovalResourceIds: z.array(z.string().trim().min(1).max(120)).max(400),
+    pendingApprovalRelationshipIds: z
+      .array(z.string().trim().min(1).max(200))
+      .max(1_000),
     architecture: architectureSchema,
   })
   .strict()
@@ -342,6 +360,14 @@ export const deploymentPlanSchema = z
       stageResources
         .filter((resource) => resource.approvalStatus === "pending")
         .map((resource) => resource.id),
+    );
+    const stageRelationships = plan.architecture.relationships.filter(
+      (relationship) => relationship.origin === "stage-upgrade",
+    );
+    const pendingStageRelationshipIds = new Set(
+      stageRelationships
+        .filter((relationship) => relationship.approvalStatus === "pending")
+        .map((relationship) => relationship.id),
     );
     const pendingIds = new Set<string>();
     for (const [index, id] of plan.pendingApprovalResourceIds.entries()) {
@@ -372,14 +398,50 @@ export const deploymentPlanSchema = z
       }
     }
 
-    if (plan.requiresApproval !== (stageResources.length > 0)) {
+    const pendingRelationshipIds = new Set<string>();
+    for (const [index, id] of plan.pendingApprovalRelationshipIds.entries()) {
+      if (pendingRelationshipIds.has(id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["pendingApprovalRelationshipIds", index],
+          message: `Duplicate pending approval relationship id: ${id}`,
+        });
+      }
+      pendingRelationshipIds.add(id);
+      if (!pendingStageRelationshipIds.has(id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["pendingApprovalRelationshipIds", index],
+          message: `Pending approval id does not reference a pending stage relationship: ${id}`,
+        });
+      }
+    }
+
+    for (const id of pendingStageRelationshipIds) {
+      if (!pendingRelationshipIds.has(id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["pendingApprovalRelationshipIds"],
+          message: `Pending stage relationship is missing from the approval list: ${id}`,
+        });
+      }
+    }
+
+    if (
+      plan.requiresApproval !==
+      (stageResources.length > 0 || stageRelationships.length > 0)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["requiresApproval"],
-        message: "requiresApproval must match the presence of stage-upgrade resources.",
+        message:
+          "requiresApproval must match the presence of stage-upgrade resources or relationships.",
       });
     }
-    if (plan.approvalsSatisfied !== (pendingStageIds.size === 0)) {
+    if (
+      plan.approvalsSatisfied !==
+      (pendingStageIds.size === 0 && pendingStageRelationshipIds.size === 0)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["approvalsSatisfied"],
