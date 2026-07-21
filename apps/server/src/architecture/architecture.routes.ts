@@ -152,7 +152,7 @@ export function registerArchitectureRoutes(
   options: ArchitectureRouteOptions,
 ): void {
   app.post<{ Params: { roomId: string } }>(
-    "/api/rooms/:roomId/architecture/operations",
+    "/api/rooms/:roomId/operations",
     async (request, reply) => {
       const parsed = ArchitectureOperationRequestSchema.safeParse(request.body);
       if (!parsed.success) return invalid(reply);

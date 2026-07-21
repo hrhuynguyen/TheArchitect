@@ -133,10 +133,16 @@ export function createRevisionService({
     return documents.withDocument(input.roomId, async (live) => {
       const state = readState(live);
       assertBase(state, request.data.baseRevisionId);
-      const operationResult = applyGraphOperations(
-        state.architecture.architecture,
-        request.data.operations,
-      );
+      const operationResult = request.data.operations.length === 0
+        ? {
+            ok: true as const,
+            architecture: state.architecture.architecture,
+            diagnostics: [],
+          }
+        : applyGraphOperations(
+            state.architecture.architecture,
+            request.data.operations,
+          );
       if (!operationResult.ok) {
         return ArchitectureOperationResponseSchema.parse({
           ok: false,

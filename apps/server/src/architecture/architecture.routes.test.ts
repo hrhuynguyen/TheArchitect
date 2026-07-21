@@ -159,7 +159,7 @@ describe("authenticated architecture routes", () => {
     try {
       const operations = await app.inject({
         method: "POST",
-        url: `/api/rooms/${roomId}/architecture/operations`,
+        url: `/api/rooms/${roomId}/operations`,
         headers: { cookie: memberCookie() },
         payload: operationBody,
       });
@@ -184,7 +184,7 @@ describe("authenticated architecture routes", () => {
       });
 
       for (const url of [
-        `/api/rooms/${roomId}/architecture/operations`,
+        `/api/rooms/${roomId}/operations`,
         `/api/rooms/${roomId}/revisions`,
       ]) {
         const owner = await app.inject({
@@ -257,7 +257,7 @@ describe("authenticated architecture routes", () => {
       try {
         const response = await app.inject({
           method: "POST",
-          url: `/api/rooms/${roomId}/architecture/operations`,
+          url: `/api/rooms/${roomId}/operations`,
           headers: { cookie: memberCookie() },
           payload: operationBody,
         });
@@ -277,7 +277,7 @@ describe("authenticated architecture routes", () => {
     try {
       const operations = await app.inject({
         method: "POST",
-        url: `/api/rooms/${roomId}/architecture/operations`,
+        url: `/api/rooms/${roomId}/operations`,
         headers: { cookie: memberCookie() },
         payload: { ...operationBody, ignored: true },
       });
@@ -315,7 +315,7 @@ describe("authenticated architecture routes", () => {
     try {
       const response = await unavailable.app.inject({
         method: "POST",
-        url: `/api/rooms/${roomId}/architecture/operations`,
+        url: `/api/rooms/${roomId}/operations`,
         headers: { cookie: memberCookie() },
         payload: operationBody,
       });

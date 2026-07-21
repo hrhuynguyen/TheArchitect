@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import { APP_NAME } from "@architect/contracts";
 import "@architect/ui/tokens.css";
+import "@xyflow/react/dist/style.css";
 import "./globals.css";
 
 export const metadata: Metadata = {

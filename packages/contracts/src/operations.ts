@@ -104,11 +104,18 @@ const revisionIdentifierSchema = z.string().trim().min(1).max(200);
 export const architectureOperationRequestSchema = z
   .object({
     baseRevisionId: revisionIdentifierSchema,
-    operations: graphOperationBatchSchema,
+    operations: z.array(graphOperationSchema).max(200),
     layout: architectureLayoutSchema.optional(),
   })
   .strict()
   .superRefine((request, context) => {
+    if (request.operations.length === 0 && !request.layout) {
+      context.addIssue({
+        code: "custom",
+        path: ["operations"],
+        message: "A request must change the graph or its layout.",
+      });
+    }
     if (
       request.layout &&
       request.layout.revisionId !== request.baseRevisionId

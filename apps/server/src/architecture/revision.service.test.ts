@@ -208,6 +208,37 @@ describe("revision service", () => {
     }
   });
 
+  it("moves layout without changing semantic resources", async () => {
+    const test = await setup();
+    try {
+      const result = await test.service.applyOperations({
+        roomId: "room-a",
+        request: {
+          baseRevisionId: "revision-a",
+          operations: [],
+          layout: {
+            ...initialState.layout,
+            nodes: [{ resourceId: "bucket", x: 40, y: 80 }],
+          },
+        },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.state.architecture.architecture).toEqual(architecture);
+      expect(result.state.layout.nodes[0]).toEqual({
+        resourceId: "bucket",
+        x: 40,
+        y: 80,
+      });
+      expect(test.events).toEqual([
+        "persist:architecture_operations",
+        "publish:architect/server-operations",
+      ]);
+    } finally {
+      await test.stop();
+    }
+  });
+
   it("returns diagnostics without persisting any part of a failed batch", async () => {
     const test = await setup();
     try {

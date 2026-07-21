@@ -43,6 +43,14 @@ vi.mock("../../../features/sketch/Whiteboard", () => ({
   ),
 }));
 
+vi.mock("../../../features/architecture/GraphEditor", () => ({
+  GraphEditor: ({ roomId }: { roomId: string }) => (
+    <section aria-label="Connected architecture editor">
+      Editing room {roomId}
+    </section>
+  ),
+}));
+
 import { RoomApiError } from "../../../features/rooms/api";
 import RoomPage from "./page";
 
@@ -129,7 +137,7 @@ describe("room route", () => {
 
     await user.click(screen.getByRole("button", { name: "Complete reconstruction" }));
     expect(
-      screen.getByRole("heading", { name: "Shape the system into a buildable plan." }),
+      screen.getByRole("region", { name: "Connected architecture editor" }),
     ).toBeVisible();
     expect(
       screen.queryByRole("region", { name: "Collaborative architecture sketch" }),
@@ -173,13 +181,6 @@ describe("room route", () => {
 
   it.each([
     {
-      phase: "architect" as const,
-      kicker: "Architect workspace ready",
-      heading: "Shape the system into a buildable plan.",
-      description: "Architecture decisions and constraints will stay visible here.",
-      contentId: "architect",
-    },
-    {
       phase: "deploy" as const,
       kicker: "Deploy workspace ready",
       heading: "Move forward with the evidence in view.",
@@ -196,7 +197,7 @@ describe("room route", () => {
       expect(screen.getByRole("heading", { name: heading })).toBeVisible();
       expect(screen.getByText(description)).toBeVisible();
       expect(screen.getByText(kicker).closest("div")).toHaveAttribute("id", contentId);
-      expect(screen.getByText(contentId === "deploy" ? "Deploy" : "Architect").closest("a"))
+      expect(screen.getByText("Deploy").closest("a"))
         .toHaveAttribute("aria-current", "step");
     },
   );
@@ -212,6 +213,18 @@ describe("room route", () => {
       "aria-current",
       "step",
     );
+  });
+
+  it("mounts the connected React Flow editor in the architect phase", async () => {
+    getRoom.mockResolvedValueOnce({ ...baseRoom, phase: "architect" });
+    await renderRoomPage();
+
+    expect(
+      await screen.findByRole("region", { name: "Connected architecture editor" }),
+    ).toHaveTextContent("Editing room room-ada");
+    expect(
+      screen.queryByRole("heading", { name: "Shape the system into a buildable plan." }),
+    ).not.toBeInTheDocument();
   });
 
   it("suppresses a room result that resolves after unmount", async () => {

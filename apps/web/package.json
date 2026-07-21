@@ -12,6 +12,7 @@
     "@architect/contracts": "*",
     "@architect/ui": "*",
     "@hocuspocus/provider": "3.4.4",
+    "@xyflow/react": "12.11.2",
     "next": "^16.2.10",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

@@ -148,5 +148,14 @@ describe("GraphOperation contracts", () => {
       ...request,
       ignored: true,
     }).success).toBe(false);
+    expect(ArchitectureOperationRequestSchema.safeParse({
+      baseRevisionId: "revision-a",
+      operations: [],
+      layout: state.layout,
+    }).success).toBe(true);
+    expect(ArchitectureOperationRequestSchema.safeParse({
+      baseRevisionId: "revision-a",
+      operations: [],
+    }).success).toBe(false);
   });
 });

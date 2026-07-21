@@ -23,6 +23,21 @@ const Whiteboard = dynamic(
   },
 );
 
+const GraphEditor = dynamic(
+  () =>
+    import("../../../features/architecture/GraphEditor").then(
+      (module) => module.GraphEditor,
+    ),
+  {
+    loading: () => (
+      <div className="architecture-state">
+        <p role="status">Loading architecture editor…</p>
+      </div>
+    ),
+    ssr: false,
+  },
+);
+
 type RoomPageProps = {
   params: Promise<{ roomId: string }>;
 };
@@ -154,6 +169,8 @@ export default function RoomPage({ params }: RoomPageProps) {
             room={room}
           />
         </div>
+      ) : room.phase === "architect" ? (
+        <GraphEditor roomId={room.id} />
       ) : (
         <div className="workspace-empty" id={visiblePhase}>
           <span className="workspace-empty__mark" aria-hidden="true" />
