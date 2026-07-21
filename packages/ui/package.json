@@ -4,7 +4,11 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./button": "./src/Button.tsx",
+    "./field": "./src/Field.tsx",
+    "./status-badge": "./src/StatusBadge.tsx",
+    "./tokens.css": "./src/tokens.css"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

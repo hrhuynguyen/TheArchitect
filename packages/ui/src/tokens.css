@@ -1,0 +1,132 @@
+:root {
+  --surface: #f7f7f4;
+  --panel: #ffffff;
+  --rail: #efefec;
+  --ink: #222220;
+  --muted: #6f6f69;
+  --border: #d9d9d3;
+  --success: #19875a;
+  --success-soft: #e8f3ed;
+  --warning: #9a681f;
+  --warning-soft: #fff1d9;
+  --danger: #b44b40;
+  --focus: #2563eb;
+  --radius-panel: 18px;
+}
+
+.ui-button {
+  min-height: 44px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0.7rem 1.15rem;
+  font: inherit;
+  font-weight: 650;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    transform 150ms ease;
+}
+
+.ui-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.ui-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.ui-button--primary {
+  background: var(--ink);
+  color: var(--panel);
+}
+
+.ui-button--primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ink) 88%, var(--panel));
+}
+
+.ui-button--secondary {
+  border-color: var(--border);
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.ui-button--secondary:hover:not(:disabled),
+.ui-button--quiet:hover:not(:disabled) {
+  background: var(--rail);
+}
+
+.ui-button--quiet {
+  background: transparent;
+  color: var(--ink);
+}
+
+.ui-button--danger {
+  background: var(--danger);
+  color: var(--panel);
+}
+
+.ui-field {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.ui-field__label {
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 650;
+}
+
+.ui-field__input {
+  width: 100%;
+  min-height: 46px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--ink);
+  padding: 0.75rem 0.9rem;
+  font: inherit;
+}
+
+.ui-field__input::placeholder {
+  color: var(--muted);
+}
+
+.ui-field__input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.ui-field__message {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.ui-field__message--error {
+  color: var(--danger);
+}
+
+.ui-status {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  border-radius: 999px;
+  background: var(--rail);
+  color: var(--muted);
+  padding: 0.3rem 0.58rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.ui-status--success {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.ui-status--warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
